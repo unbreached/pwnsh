@@ -1,0 +1,63 @@
+[project]
+name = "multishell"
+version = "0.3.0"
+description = "Multi-session reverse-shell handler with a console dashboard"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "David Jacoby", email = "david@syndis.is" }]
+keywords = [
+    "security", "pentesting", "reverse-shell", "handler", "tui",
+    "textual", "offensive-security", "red-team",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Shells",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "textual>=0.63",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/syndis/Monkey-Business/tree/main/multishell"
+Issues = "https://github.com/syndis/Monkey-Business/issues"
+Changelog = "https://github.com/syndis/Monkey-Business/blob/main/multishell/CHANGELOG.md"
+
+[project.scripts]
+multishell = "multishell.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/multishell"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]  # long lines OK in this codebase
