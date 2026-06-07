@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from multishell.payloads import KINDS, generate
+from pwnsh.payloads import KINDS, generate
 
 
 @pytest.mark.parametrize("kind", KINDS)

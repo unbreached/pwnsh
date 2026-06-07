@@ -6,9 +6,10 @@ import logging
 import os
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, IO
+from typing import IO, Any
 
 from .config import MAX_ARCHIVE_LOG_BYTES, SCROLLBACK_CHUNKS, SESSIONS_DIR
 
@@ -57,7 +58,7 @@ class Session:
     bytes_tx: int = 0
     _log_fh: IO[bytes] | None = None
     _cast_fh: IO[str] | None = None
-    _data_hooks: list[Callable[["Session", bytes], None]] = field(default_factory=list)
+    _data_hooks: list[Callable[[Session, bytes], None]] = field(default_factory=list)
     _send_lock: asyncio.Lock | None = None
 
     @property
@@ -98,7 +99,7 @@ class Session:
                 "height": 32,
                 "timestamp": int(self.connected_at),
                 "env": {"SHELL": "/bin/sh", "TERM": "xterm-256color"},
-                "title": f"multishell #{self.id} {self.remote[0]}:{self.remote[1]}",
+                "title": f"pwnsh #{self.id} {self.remote[0]}:{self.remote[1]}",
             }
             self._cast_fh.write(json.dumps(header) + "\n")
             self._cast_fh.flush()
@@ -134,10 +135,10 @@ class Session:
             except Exception:
                 pass
 
-    def add_data_hook(self, hook: Callable[["Session", bytes], None]) -> None:
+    def add_data_hook(self, hook: Callable[[Session, bytes], None]) -> None:
         self._data_hooks.append(hook)
 
-    def remove_data_hook(self, hook: Callable[["Session", bytes], None]) -> None:
+    def remove_data_hook(self, hook: Callable[[Session, bytes], None]) -> None:
         try:
             self._data_hooks.remove(hook)
         except ValueError:
@@ -200,7 +201,7 @@ class Session:
             pass
 
     @classmethod
-    def from_archive(cls, meta_path: Path) -> "Session | None":
+    def from_archive(cls, meta_path: Path) -> Session | None:
         try:
             meta = json.loads(meta_path.read_text())
         except Exception:

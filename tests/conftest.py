@@ -1,7 +1,7 @@
 """Shared pytest fixtures.
 
-Tests run against a per-suite tmp dir so the user's real ~/.multishell/ is
-never touched. We rewire HOME *before* any multishell module is imported,
+Tests run against a per-suite tmp dir so the user's real ~/.pwnsh/ is
+never touched. We rewire HOME *before* any pwnsh module is imported,
 so `pathlib.Path.home()` (and everything derived from it in config.py) sees
 the tmp path. Then we patch the names that other modules captured at import
 time (`session.py` does `from .config import SESSIONS_DIR`, which binds the
@@ -14,16 +14,16 @@ import socket
 import tempfile
 from pathlib import Path
 
-# 1) Rewire HOME so config.py's module-level `Path.home() / ".multishell"` lands
-#    in tmp.  This MUST run before `import multishell.*`.
-_tmp_home = Path(tempfile.mkdtemp(prefix="multishell-test-"))
+# 1) Rewire HOME so config.py's module-level `Path.home() / ".pwnsh"` lands
+#    in tmp.  This MUST run before `import pwnsh.*`.
+_tmp_home = Path(tempfile.mkdtemp(prefix="pwnsh-test-"))
 os.environ["HOME"] = str(_tmp_home)
 
 import pytest  # noqa: E402
 
-from multishell import config as _config  # noqa: E402
-from multishell import session as _session  # noqa: E402
-from multishell import transfer as _transfer  # noqa: E402
+from pwnsh import config as _config  # noqa: E402
+from pwnsh import session as _session  # noqa: E402
+from pwnsh import transfer as _transfer  # noqa: E402
 
 # 2) Other modules captured these dir paths at import. Re-bind their names too.
 _session.SESSIONS_DIR = _config.SESSIONS_DIR

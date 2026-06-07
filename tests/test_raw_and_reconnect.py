@@ -4,13 +4,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import re
-import sys
 
-from multishell.fingerprint import callback_pty_payload
-from multishell.listener import TCPListener
-from multishell.raw_interact import DEFAULT_ESCAPE, run_raw_bridge
-from multishell.session import SessionRegistry
+from pwnsh.fingerprint import callback_pty_payload
+from pwnsh.listener import TCPListener
+from pwnsh.raw_interact import DEFAULT_ESCAPE, run_raw_bridge
+from pwnsh.session import SessionRegistry
 
 
 def test_callback_pty_payload_contains_three_fallbacks():
@@ -19,7 +17,7 @@ def test_callback_pty_payload_contains_three_fallbacks():
     assert "exec:/bin/bash,pty,stderr,setsid,sigint,sane" in p
     assert "python3 -c" in p
     assert "python -c" in p
-    assert "@@MS_RECONNECT_FAIL@@" in p
+    assert "@@PW_RECONNECT_FAIL@@" in p
     # detached so the spawned shell survives the parent exiting
     assert "&)" in p
     # uses the right host:port
@@ -69,7 +67,7 @@ def test_raw_bridge_aborts_when_stdin_is_not_tty(free_port):
 def test_raw_bridge_refuses_archived_session():
     """Archived sessions have writer=None — raw mode would have nothing to
     write to, so it must bail out without touching termios."""
-    from multishell.session import Session
+    from pwnsh.session import Session
 
     async def go():
         s = Session(

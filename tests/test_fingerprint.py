@@ -4,14 +4,14 @@ import asyncio
 import contextlib
 import re
 
-from multishell.fingerprint import (
+from pwnsh.fingerprint import (
     Fingerprinter,
     PtyUpgrader,
     _guess_os,
     pty_upgrade_payload,
 )
-from multishell.listener import TCPListener
-from multishell.session import SessionRegistry
+from pwnsh.listener import TCPListener
+from pwnsh.session import SessionRegistry
 
 
 def test_guess_os_maps_uname_strings():
@@ -48,15 +48,15 @@ def test_fingerprinter_parses_sentinel_reply(free_port):
                         if not data:
                             return
                         buf += data
-                        if b"@@MSFPBEGIN@@" in buf and b"<SENT>" not in buf:
+                        if b"@@PWFPBEGIN@@" in buf and b"<SENT>" not in buf:
                             w.write(
-                                b"@@MSFPBEGIN@@\n"
+                                b"@@PWFPBEGIN@@\n"
                                 b"Linux 6.5 x86_64\n"
                                 b"uid=1000(alice) gid=1000(alice) groups=1000\n"
                                 b"victim01\n"
                                 b"/bin/bash\n"
                                 b"/home/alice\n"
-                                b"@@MSFPEND@@\n"
+                                b"@@PWFPEND@@\n"
                             )
                             await w.drain()
                             buf += b"<SENT>"
@@ -103,12 +103,12 @@ def _drive_pty_sync(emit: str, free_port: int) -> tuple[bool, str]:
                             return
                         buf += data
                         text = buf.decode(errors="replace")
-                        m = re.search(r"@@MS_PTY_READY_[0-9a-f]+@@", text)
+                        m = re.search(r"@@PW_PTY_READY_[0-9a-f]+@@", text)
                         if m and b"<H>" not in buf:
                             if emit == "ready":
                                 w.write((m.group(0) + "\n").encode())
                             elif emit == "fail":
-                                w.write(b"@@MS_PTY_FAIL_deadbeef@@\n")
+                                w.write(b"@@PW_PTY_FAIL_deadbeef@@\n")
                             await w.drain()
                             buf += b"<H>"
                 except (asyncio.CancelledError, ConnectionResetError, OSError):

@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import os
 import secrets
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._scan import StreamScanner
 from .config import LOOT_DIR
 from .session import Session
 
 
 def _sentinel(tag: str) -> str:
-    return f"@@MSX_{tag}_{secrets.token_hex(4)}@@"
+    return f"@@PWX_{tag}_{secrets.token_hex(4)}@@"
 
 
 @dataclass
@@ -25,24 +27,33 @@ class TransferResult:
 
 
 class Collector:
-    """Collects incoming bytes until two sentinels are seen, returns the span between."""
+    """Collects incoming bytes until two sentinels are seen, returns the span between.
+
+    Scans the raw byte buffer incrementally (see :mod:`pwnsh._scan`) so a large
+    ``/get`` doesn't re-decode the whole payload on every read.
+    """
 
     def __init__(self, session: Session, begin: str, end: str) -> None:
         self.session = session
-        self.begin = begin
-        self.end = end
-        self._buf = bytearray()
+        self._begin = begin.encode()
+        self._end = end.encode()
+        self._scan = StreamScanner()
+        self._begin_at = -1
         self._done = asyncio.Event()
         self._payload = ""
 
     def _on_data(self, s: Session, data: bytes) -> None:
-        self._buf.extend(data)
-        text = self._buf.decode("utf-8", errors="replace")
-        if self.begin in text and self.end in text:
-            start = text.index(self.begin) + len(self.begin)
-            stop = text.index(self.end, start)
-            self._payload = text[start:stop]
-            self._done.set()
+        self._scan.feed(data)
+        if self._begin_at < 0:
+            i = self._scan.find(self._begin)
+            if i < 0:
+                return
+            self._begin_at = i + len(self._begin)
+        stop = self._scan.find(self._end, self._begin_at, streaming=True)
+        if stop < 0:
+            return
+        self._payload = self._scan.text(self._begin_at, stop)
+        self._done.set()
 
     async def wait(self, timeout: float) -> str | None:
         self.session.add_data_hook(self._on_data)
@@ -50,7 +61,7 @@ class Collector:
             try:
                 await asyncio.wait_for(self._done.wait(), timeout=timeout)
                 return self._payload
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return None
         finally:
             self.session.remove_data_hook(self._on_data)
@@ -73,7 +84,7 @@ async def put_file(
     q_remote = shlex.quote(remote_path)
     done = _sentinel("PUT_DONE")
 
-    eot = "MSX_EOT_" + secrets.token_hex(4)
+    eot = "PWX_EOT_" + secrets.token_hex(4)
     cmd = (
         f"(base64 -d > {q_remote} 2>/dev/null || "
         f"openssl base64 -d -A > {q_remote} 2>/dev/null) <<'{eot}'\n"
@@ -101,7 +112,7 @@ async def put_file(
         path=Path(remote_path),
         sha256=digest,
         message=f"uploaded {len(payload)} B → {remote_path}"
-        + (f" (sha256 ok)" if remote_digest else " (no sha256 tool on target)"),
+        + (" (sha256 ok)" if remote_digest else " (no sha256 tool on target)"),
     )
 
 
@@ -133,10 +144,19 @@ async def get_file(
     except Exception as e:
         return TransferResult(False, message=f"base64 decode failed: {e}")
     digest = hashlib.sha256(payload).hexdigest()
+    # `Path(remote).name` strips any directory components, so the target can't
+    # steer the write outside the loot dir. Guard the degenerate cases where it
+    # is empty (e.g. remote was "/" or "..") so we never try to clobber the dir.
+    name = Path(remote).name or f"download-{session.id:04d}.bin"
     loot_dir = LOOT_DIR / f"session-{session.id:04d}"
-    loot_dir.mkdir(parents=True, exist_ok=True)
-    dest = loot_dir / Path(remote).name
-    dest.write_bytes(payload)
+    try:
+        loot_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(loot_dir, 0o700)
+        dest = loot_dir / name
+        dest.write_bytes(payload)
+        os.chmod(dest, 0o600)
+    except OSError as e:
+        return TransferResult(False, sha256=digest, message=f"cannot write loot: {e}")
     return TransferResult(
         True,
         path=dest,

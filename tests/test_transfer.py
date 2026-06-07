@@ -6,9 +6,9 @@ import contextlib
 import hashlib
 import re
 
-from multishell.listener import TCPListener
-from multishell.session import SessionRegistry
-from multishell.transfer import get_file, put_file
+from pwnsh.listener import TCPListener
+from pwnsh.session import SessionRegistry
+from pwnsh.transfer import get_file, put_file
 
 
 def test_put_roundtrip_succeeds_with_sha256_match(tmp_path, free_port):
@@ -33,8 +33,8 @@ def test_put_roundtrip_succeeds_with_sha256_match(tmp_path, free_port):
                             return
                         buf += data
                         text = buf.decode(errors="replace")
-                        m_eot = re.search(r"MSX_EOT_[0-9a-f]+", text)
-                        m_done = re.search(r"@@MSX_PUT_DONE_[0-9a-f]+@@", text)
+                        m_eot = re.search(r"PWX_EOT_[0-9a-f]+", text)
+                        m_done = re.search(r"@@PWX_PUT_DONE_[0-9a-f]+@@", text)
                         if m_eot and m_done and b"<H>" not in buf:
                             reply = (m_eot.group(0) + "\n" + digest + "  /tmp/out.bin\n"
                                      + m_done.group(0) + "\n")
@@ -83,8 +83,8 @@ def test_get_roundtrip_lands_in_loot_with_matching_bytes(loot_dir, free_port):
                             return
                         buf += data
                         text = buf.decode(errors="replace")
-                        m_b = re.search(r"@@MSX_GET_BEGIN_[0-9a-f]+@@", text)
-                        m_e = re.search(r"@@MSX_GET_END_[0-9a-f]+@@", text)
+                        m_b = re.search(r"@@PWX_GET_BEGIN_[0-9a-f]+@@", text)
+                        m_e = re.search(r"@@PWX_GET_END_[0-9a-f]+@@", text)
                         if m_b and m_e and b"<H>" not in buf:
                             b64 = base64.b64encode(payload).decode()
                             reply = m_b.group(0) + "\n" + b64 + "\n" + m_e.group(0) + "\n"

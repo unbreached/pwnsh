@@ -1,25 +1,30 @@
-# multishell
+# pwnsh
 
 > Multi-session reverse-shell handler with a terminal dashboard.
 > Think pwncat, but with search, replay, persistence, and a nicer TUI.
 
 ```
-┌──────────────────────┬──────────────────────────────────────────────────┐
-│ [ SESSIONS ]         │ #3  web-prod-01  ● LIVE  rx 12.3K tx 842B        │
-│ #1 ✗ old-box          │──────────────────────────────────────────────────│
-│ #2 ● kiosk-07         │ USER  alice@victim-01     SHELL  /bin/bash      │
-│ #3 ● web-prod-01 ★    │ OS    Linux 6.5 x86_64    CWD    /home/alice    │
-│ #4 · (archived)       │ NOTE  rails secret_key_base at /opt/app/.env    │
-│                       │──────────────────────────────────────────────────│
-│                       │ alice@victim-01:~$ id                           │
-│                       │ uid=1000(alice) gid=1000(alice) groups=1000     │
-│                       │ alice@victim-01:~$ sudo -l                      │
-│                       │ (bash) ALL : ALL NOPASSWD: /usr/bin/tar         │
-│ TCP 0.0.0.0:9090 ●    │──────────────────────────────────────────────────│
-│  LISTENING            │ web-prod-01 ❯ /put ~/tools/linpeas.sh /tmp/.x   │
-└──────────────────────┴──────────────────────────────────────────────────┘
- Ctrl+K palette  Ctrl+F search  F2 rename  Ctrl+U PTY  Ctrl+X kill
+╭─ SESSIONS ─────────╮╭─ #3 · web-prod-01 · ● LIVE ──────────────────────╮
+│ #1 ✗ old-box       ││ alice@victim-01:~$ id                            │
+│ #2 ● kiosk-07      ││ uid=1000(alice) gid=1000(alice) groups=1000      │
+│ #3 ● web-prod-01 ★ ││ alice@victim-01:~$ sudo -l                       │
+│ #4 · (archived)    ││ (bash) ALL : ALL NOPASSWD: /usr/bin/tar          │
+│                    ││                                                  │
+│                    ││ ❯ /put ~/tools/linpeas.sh /tmp/.x                │
+╰────────────────────╯╰──────────────────────────────────────────────────╯
+╭─ TARGET ───────────────────────────────────────────────────────────────╮
+│ alice@victim-01 · Linux · /bin/bash · /home/alice · rx 12.3K tx 842B    │
+│─ LISTENER ──────────────────────────────────────────────────────────────│
+│ ● 0.0.0.0:9090 · 2 live · 2 archived · #3 fingerprinted                 │
+╰─────────────────────────────────────────────────────────────────────────╯
+ ^q quit  ^n/^p cycle  ^f search  ^u pty  ^g raw  ^x kill  f2 rename  ^k palette
 ```
+
+The right pane is one terminal: **click anywhere in the output and start
+typing** — the prompt is always focused, and a click brings focus back to it.
+The live session's name and status ride the terminal's frame title; the framed
+**TARGET** / **LISTENER** panel below carries the fingerprint, byte counters,
+and listener/debug line.
 
 ---
 
@@ -70,7 +75,7 @@ usable file transfer and a dashboard that doesn't get in the way.
   to return to the dashboard.
 - **File transfer** — `/put ~/linpeas.sh /tmp/.x` (base64 heredoc, sha256
   verify, sentinel framing). `/get /etc/shadow` → drops into
-  `~/.multishell/loot/session-NNNN/`.
+  `~/.pwnsh/loot/session-NNNN/`.
 - **Command palette** (`Ctrl+K`) — fuzzy-find any action, including
   "switch to session #N".
 - **Rename + sticky notes** — `F2` / `Ctrl+O`, persisted across runs.
@@ -91,12 +96,12 @@ LOLBins, DNS/TLS tunnels, encoding tricks, and blue-team detection signals.
 
 ```sh
 git clone https://github.com/syndis/Monkey-Business
-cd Monkey-Business/multishell
+cd Monkey-Business/pwnsh
 ./run.sh
 ```
 
 `run.sh` is self-bootstrapping: on first run it creates `.venv/`,
-installs multishell in editable mode, and execs the entry point.
+installs pwnsh in editable mode, and execs the entry point.
 Subsequent runs skip straight to launch. Pass any flag through:
 
 ```sh
@@ -112,14 +117,14 @@ no global state, nothing to install outside the checkout.
 ./install.sh
 ```
 
-Creates `.venv/`, installs editable, and symlinks `multishell` into
-`~/.local/bin/`. Override with `MULTISHELL_BIN_DIR=…`. Needs Python 3.11+.
+Creates `.venv/`, installs editable, and symlinks `pwnsh` into
+`~/.local/bin/`. Override with `PWNSH_BIN_DIR=…`. Needs Python 3.11+.
 
 ### With `uv` (faster)
 
 ```sh
 uv venv && uv pip install -e .
-./.venv/bin/multishell
+./.venv/bin/pwnsh
 ```
 
 ### Via `make`
@@ -134,7 +139,7 @@ make test
 
 ## Running over SSH / inside tmux or screen
 
-multishell is built to run on the box you're operating from, including
+pwnsh is built to run on the box you're operating from, including
 inside `tmux` / `screen` over SSH:
 
 - The default keybindings (`Ctrl+N/P/F/U/G/X/K/Q`) don't collide with the
@@ -143,14 +148,14 @@ inside `tmux` / `screen` over SSH:
 - Custom theme registration is skipped automatically when `TERM=dumb`,
   unset, or `NO_COLOR` is set, so a stripped-down SSH session still launches.
 - Raw-interact mode (`Ctrl+G` / `/raw`) needs a real TTY; if it ever looks
-  frozen, exit it with `Ctrl+]` and you're back in the dashboard.
+  frozen, press `Ctrl+G` again and you're back in the dashboard.
 
 ## Quickstart
 
 In terminal 1:
 
 ```sh
-multishell              # listen on 0.0.0.0:9090
+pwnsh              # listen on 0.0.0.0:9090
 ```
 
 In terminal 2 (fake a victim — pick a **non-interactive** shell, see note below):
@@ -186,9 +191,12 @@ A session appears in the sidebar. In the TUI:
 | `Ctrl+G`       | raw-interact mode (vim / htop / tab / Ctrl+C work) |
 | `Ctrl+F`       | global scrollback search (regex)        |
 | `Ctrl+K`       | command palette                         |
-| `Ctrl+X`       | kill + remove current session           |
-| `Ctrl+Q` / `Esc` | quit                                  |
+| `Ctrl+X`       | kill + remove current session (confirms) |
+| `Ctrl+Q`       | quit (confirms if any session is live)  |
 | `↑` / `↓` in sidebar | switch session                    |
+
+> `Esc` is intentionally **not** bound to quit — it's too easy to hit by
+> reflex and drop every live session. `Esc` only dismisses modals.
 
 ## Slash commands
 
@@ -198,7 +206,7 @@ Type into the bottom input.
 | --------------------- | ------------------------------------------------------ |
 | `/help`               | list commands inside the scrollback                    |
 | `/put <local> [remote]` | upload a file                                        |
-| `/get <remote>`       | download a file to `~/.multishell/loot/session-NNNN/`  |
+| `/get <remote>`       | download a file to `~/.pwnsh/loot/session-NNNN/`  |
 | `/tag <name>` (or `/rename`) | rename session                                  |
 | `/note <text>`        | sticky note                                            |
 | `/pty [shell]`        | PTY upgrade in-place (optional shell override)         |
@@ -214,7 +222,7 @@ to the currently selected live session.
 ## CLI flags
 
 ```
-multishell [-p PORT] [-b BIND] [--no-history] [-V]
+pwnsh [-p PORT] [-b BIND] [--no-history] [-V]
 
   -p, --port        listen port (default 9090)
   -b, --bind        interface to bind on (default 0.0.0.0 — all interfaces;
@@ -227,10 +235,10 @@ multishell [-p PORT] [-b BIND] [--no-history] [-V]
 
 | Path                                            | What                            |
 | ----------------------------------------------- | ------------------------------- |
-| `~/.multishell/sessions/<ts>-<id>-<ip>.log`     | raw byte log, per session       |
-| `~/.multishell/sessions/<ts>-<id>-<ip>.cast`    | asciinema v2 replay             |
-| `~/.multishell/sessions/<ts>-<id>-<ip>.meta.json` | tag, note, fingerprint        |
-| `~/.multishell/loot/session-<id>/`              | files downloaded with `/get`    |
+| `~/.pwnsh/sessions/<ts>-<id>-<ip>.log`     | raw byte log, per session       |
+| `~/.pwnsh/sessions/<ts>-<id>-<ip>.cast`    | asciinema v2 replay             |
+| `~/.pwnsh/sessions/<ts>-<id>-<ip>.meta.json` | tag, note, fingerprint        |
+| `~/.pwnsh/loot/session-<id>/`              | files downloaded with `/get`    |
 
 The data dir is `chmod 700`; log files `chmod 600`.
 
@@ -258,7 +266,7 @@ from plain scripts.
 ## Project layout
 
 ```
-multishell/
+pwnsh/
 ├── LICENSE
 ├── README.md
 ├── CHANGELOG.md
@@ -267,7 +275,7 @@ multishell/
 ├── pyproject.toml
 ├── docs/
 │   └── REVERSE_SHELLS.md       # 15-section payload cheat sheet
-├── src/multishell/
+├── src/pwnsh/
 │   ├── __main__.py             # argparse entry
 │   ├── config.py               # paths, ports, limits
 │   ├── listener.py             # async TCP accept loop + DoS guard
@@ -287,13 +295,18 @@ multishell/
 - **Default bind is `0.0.0.0`** (all interfaces) because reverse shells
   usually need to be reachable from the LAN. Use `-b 127.0.0.1` for
   local-only listening.
-- **No authentication** in v0.1 — anyone who probes your port becomes a
+- **No authentication** yet — anyone who probes your port becomes a
   session in the sidebar. A roadmap item is HMAC handshake (first N
   bytes must match a shared secret, else drop the connection).
+- **Reconnect targets are validated.** `/pty --reconnect host:port` bakes the
+  host into shell/python one-liners; the host is restricted to IP/DNS
+  characters so a stray quote or metacharacter can't break out of the payload.
+- **Destructive actions confirm.** Quitting with live sessions, `Ctrl+X`/`/kill`,
+  and `/prune` all prompt first and warn that recorded evidence is deleted.
 - **Target is untrusted** — the scrollback shows whatever the target
   sends, including ANSI escape sequences. Rich's `Text.from_ansi`
   parser is used; it handles CSI but a hostile target could still
-  attempt terminal manipulation. Run multishell in a disposable
+  attempt terminal manipulation. Run pwnsh in a disposable
   terminal or tmux session if you're catching callbacks from boxes
   you don't trust.
 - **Logs contain loot.** Data dirs are `chmod 700`, files `chmod 600`.

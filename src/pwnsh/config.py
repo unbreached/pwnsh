@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-DATA_DIR = Path.home() / ".multishell"
+DATA_DIR = Path.home() / ".pwnsh"
 SESSIONS_DIR = DATA_DIR / "sessions"
 LOOT_DIR = DATA_DIR / "loot"
 

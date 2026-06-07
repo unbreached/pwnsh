@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from multishell.listener import TCPListener
-from multishell.session import SessionRegistry
+from pwnsh.listener import TCPListener
+from pwnsh.session import SessionRegistry
 
 
 def test_listener_accepts_connection_and_records_bytes(free_port):
@@ -13,7 +13,7 @@ def test_listener_accepts_connection_and_records_bytes(free_port):
         await listener.start()
         try:
             r, w = await asyncio.open_connection("127.0.0.1", free_port)
-            w.write(b"hello multishell\n")
+            w.write(b"hello pwnsh\n")
             await w.drain()
             await asyncio.sleep(0.1)
             w.close()
@@ -27,7 +27,7 @@ def test_listener_accepts_connection_and_records_bytes(free_port):
     sessions = reg.all()
     assert len(sessions) == 1
     s = sessions[0]
-    assert s.bytes_rx >= len(b"hello multishell\n")
+    assert s.bytes_rx >= len(b"hello pwnsh\n")
     assert s.status == "closed"
 
 

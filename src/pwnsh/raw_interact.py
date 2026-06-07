@@ -7,7 +7,7 @@ Used while the Textual app is suspended (`App.suspend()`):
   2. asyncio bridge:
        stdin (fd 0) → session.writer    via `loop.add_reader`
        session.record_rx → stdout (fd 1) via a data-hook
-  3. Watch for an `escape` byte (default 0x1d, i.e. Ctrl+]) on stdin to
+  3. Watch for an `escape` byte (default 0x07, i.e. Ctrl+G) on stdin to
      break out and return to the dashboard.
 
 The session keeps recording everything to its log/cast files because we
@@ -99,7 +99,7 @@ async def run_raw_bridge(
     try:
         if banner:
             label = session.label
-            tag = f"\r\n\x1b[36m[multishell raw mode — {label} — Ctrl+G to return]\x1b[0m\r\n"
+            tag = f"\r\n\x1b[36m[pwnsh raw mode — {label} — Ctrl+G to return]\x1b[0m\r\n"
             with contextlib.suppress(OSError):
                 os.write(fd_out, tag.encode())
 

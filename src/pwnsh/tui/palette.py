@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 
 if TYPE_CHECKING:
-    from .app import MultiShellApp
+    from .app import PwnshApp
 
 
-class MultiShellCommands(Provider):
-    """Surfaces multishell actions + session switches in the command palette."""
+class PwnshCommands(Provider):
+    """Surfaces pwnsh actions + session switches in the command palette."""
 
     @property
-    def ms_app(self) -> "MultiShellApp":
+    def ms_app(self) -> PwnshApp:
         return self.app  # type: ignore[return-value]
 
     async def discover(self) -> Hits:
@@ -47,7 +47,7 @@ class MultiShellCommands(Provider):
             DiscoveryHit("Download file (/get)", app.action_get_prompt, help="Pull a remote file into loot"),
             DiscoveryHit("Close and remove session", app.action_kill_session, help="Disconnect + drop from list (Ctrl+X)"),
             DiscoveryHit("Prune dead sessions", app.action_prune_dead, help="Remove every non-live session"),
-            DiscoveryHit("Quit", app.action_quit, help="Exit multishell"),
+            DiscoveryHit("Quit", app.action_request_quit, help="Exit pwnsh (confirms if sessions are live)"),
         ]
 
     async def _session_actions(self):

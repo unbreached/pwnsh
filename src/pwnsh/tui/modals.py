@@ -6,11 +6,64 @@ from dataclasses import dataclass
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, ListItem, ListView, Static
+from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 from ..session import SessionRegistry
+
+
+class ConfirmModal(ModalScreen[bool]):
+    """Yes/No confirmation for destructive actions (quit with live sessions,
+    kill, prune). Defaults focus to Cancel so a reflexive Enter is safe; ``y``
+    confirms, ``n``/``Esc`` cancel."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss(False)", "Cancel", show=False),
+        Binding("n", "dismiss(False)", "No", show=False),
+        Binding("y", "confirm", "Yes", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    ConfirmModal { align: center middle; }
+    ConfirmModal > Vertical {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        background: $panel;
+        border: tall $accent;
+    }
+    ConfirmModal Label { padding-bottom: 1; }
+    ConfirmModal Horizontal { height: auto; align-horizontal: right; }
+    ConfirmModal Button { margin-left: 2; min-width: 12; }
+    """
+
+    def __init__(self, message: str, confirm_label: str = "Confirm") -> None:
+        super().__init__()
+        self._message = message
+        self._confirm_label = confirm_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(self._message)
+            with Horizontal():
+                yield Button(self._confirm_label, variant="error", id="confirm")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        # Focus the safe option by default.
+        self.query_one("#cancel", Button).focus()
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#confirm")
+    def _confirm(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(False)
 
 
 class PromptModal(ModalScreen[str | None]):

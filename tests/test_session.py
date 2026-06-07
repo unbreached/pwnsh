@@ -7,7 +7,7 @@ import stat
 
 import pytest
 
-from multishell.session import Fingerprint, Session, SessionRegistry
+from pwnsh.session import Fingerprint, Session, SessionRegistry
 
 
 class _FakeWriter:
@@ -60,7 +60,7 @@ def test_session_open_log_writes_header_and_tight_perms(sessions_dir):
     assert stat.S_IMODE(os.stat(s.cast_path).st_mode) == 0o600
     header = json.loads(s.cast_path.read_text().splitlines()[0])
     assert header["version"] == 2
-    assert header["title"].startswith("multishell #7")
+    assert header["title"].startswith("pwnsh #7")
     s.close_log()
 
 
@@ -140,7 +140,6 @@ def test_registry_add_emits_callbacks_in_order(sessions_dir):
 
 
 def test_registry_load_history_bumps_next_id(sessions_dir):
-    reg = SessionRegistry()
     for i in (7, 13):
         r, w = _make_pair()
         s = Session(id=i, reader=r, writer=w, remote=("10.0.0.1", i))
