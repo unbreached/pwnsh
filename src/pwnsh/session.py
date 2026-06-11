@@ -272,8 +272,7 @@ class SessionRegistry:
         s = Session(id=sid, reader=reader, writer=writer, remote=remote)
         s.open_log()
         self._sessions[sid] = s
-        for cb in self._on_add:
-            cb(s)
+        self._dispatch(self._on_add, s)
         return s
 
     def get(self, sid: int) -> Session | None:
@@ -300,18 +299,30 @@ class SessionRegistry:
     def on_remove(self, cb: OnRemove) -> None:
         self._on_remove.append(cb)
 
+    @staticmethod
+    def _dispatch(callbacks: list, *args: Any) -> None:
+        """Call every callback, isolating failures.
+
+        A misbehaving observer (e.g. a TUI update while the app is suspended
+        for raw-interact mode) must never propagate into the socket reader
+        loop — that would kill the session on the first chunk of output.
+        """
+        for cb in callbacks:
+            try:
+                cb(*args)
+            except Exception:
+                log.debug("session registry callback failed", exc_info=True)
+
     def emit_data(self, session: Session, data: bytes) -> None:
         session.record_rx(data)
-        for cb in self._on_data:
-            cb(session, data)
+        self._dispatch(self._on_data, session, data)
 
     def emit_close(self, session: Session) -> None:
         if session.status != "alive":
             return
         session.status = "closed"
         session.close_log()
-        for cb in self._on_close:
-            cb(session)
+        self._dispatch(self._on_close, session)
 
     def remove(self, sid: int) -> bool:
         s = self._sessions.pop(sid, None)
@@ -324,8 +335,7 @@ class SessionRegistry:
                 pass
             s.status = "closed"
         s.delete_archive()
-        for cb in self._on_remove:
-            cb(s)
+        self._dispatch(self._on_remove, s)
         return True
 
     def close_all(self) -> None:

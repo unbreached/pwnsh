@@ -160,6 +160,7 @@ class PwnshApp(App):
         self.listener = TCPListener(self.registry, host=host, port=port)
         self._load_history = load_history
         self._status_msg = ""  # most recent notification, mirrored to the status bar
+        self._raw_active = False  # True while suspended for raw-interact mode
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="body"):
@@ -273,6 +274,12 @@ class PwnshApp(App):
             self._run_fingerprint(s, auto=True)
 
     def _on_session_data(self, s: Session, data: bytes) -> None:
+        # During raw-interact the app is suspended — touching widgets here can
+        # raise and (before the reader loop was hardened) kill the session.
+        # Output still reaches the terminal via the raw bridge's own hook, and
+        # we repaint from scrollback on return. So skip the TUI update entirely.
+        if self._raw_active:
+            return
         if self.selected_id == s.id:
             self._append_scrollback(data)
 
@@ -356,6 +363,16 @@ class PwnshApp(App):
         except Exception:
             rich_log.write(repr(data))
 
+    def _repaint_scrollback(self, s: Session) -> None:
+        """Clear the pane and replay a session's full scrollback into it."""
+        rich_log = self.query_one("#scrollback", RichLog)
+        rich_log.clear()
+        for chunk in s.scrollback:
+            try:
+                rich_log.write(Text.from_ansi(chunk.decode("utf-8", errors="replace")))
+            except Exception:
+                rich_log.write(repr(chunk))
+
     def _refresh_status(self) -> None:
         """Update the framed status panel — the main pane's title, the TARGET
         (fingerprint) line, and the LISTENER (listener / debug) line."""
@@ -411,24 +428,12 @@ class PwnshApp(App):
         self._refresh_status()
 
     def watch_selected_id(self, old: int | None, new: int | None) -> None:
-        rich_log = self.query_one("#scrollback", RichLog)
-        rich_log.clear()
-        if new is None:
-            self._show_banner()
-            self._refresh_status()
-            self._update_prompt()
-            return
-        s = self.registry.get(new)
+        s = self.registry.get(new) if new is not None else None
         if s is None:
+            self.query_one("#scrollback", RichLog).clear()
             self._show_banner()
-            self._refresh_status()
-            self._update_prompt()
-            return
-        for chunk in s.scrollback:
-            try:
-                rich_log.write(Text.from_ansi(chunk.decode("utf-8", errors="replace")))
-            except Exception:
-                rich_log.write(repr(chunk))
+        else:
+            self._repaint_scrollback(s)
         self._refresh_status()
         self._update_prompt()
 
@@ -726,13 +731,19 @@ class PwnshApp(App):
             self.notify("need a live session for raw-interact", severity="warning")
             return
         sid = s.id
+        self._raw_active = True
         try:
             with self.suspend():
                 msg = await run_raw_bridge(s)
         except Exception as e:
             self.notify(f"raw-interact error: {e}", severity="error")
             return
-        # Force-redraw of the session pane (we wrote bytes directly to stdout).
+        finally:
+            self._raw_active = False
+        # We suppressed live scrollback updates while suspended — repaint the
+        # pane from the session's scrollback so the TUI catches up on the
+        # bytes that flowed during raw mode.
+        self._repaint_scrollback(s)
         self._refresh_table()
         self._refresh_status()
         self.notify(f"#{sid} {msg}")

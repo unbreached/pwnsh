@@ -139,6 +139,49 @@ def test_registry_add_emits_callbacks_in_order(sessions_dir):
     assert reg.get(s.id) is None
 
 
+def test_registry_callback_failure_does_not_break_dispatch(sessions_dir):
+    """Regression: a raising observer must not propagate into the caller.
+
+    Reproduces the raw-interact hang — while the TUI was suspended, its
+    on_data callback raised on the first chunk of socket output, the
+    exception escaped emit_data into the listener's read loop, and the
+    session's reader task died (so it 'hung' after one command). Every
+    dispatch point must isolate callback failures and still run the
+    remaining observers / record the data.
+    """
+    reg = SessionRegistry()
+    seen = []
+
+    def boom(*_args):
+        raise RuntimeError("observer blew up")
+
+    reg.on_add(boom)
+    reg.on_add(lambda s: seen.append(("add", s.id)))
+    reg.on_data(boom)
+    reg.on_data(lambda s, d: seen.append(("data", bytes(d))))
+    reg.on_close(boom)
+    reg.on_close(lambda s: seen.append(("close", s.id)))
+    reg.on_remove(boom)
+    reg.on_remove(lambda s: seen.append(("remove", s.id)))
+
+    r, w = _make_pair()
+    s = reg.add(r, w, ("1.1.1.1", 2))      # must not raise despite boom
+    reg.emit_data(s, b"id\n")               # the chunk that used to kill it
+    reg.emit_close(s)
+    assert reg.remove(s.id) is True
+
+    # The well-behaved observers still fired, in order...
+    assert seen == [
+        ("add", s.id),
+        ("data", b"id\n"),
+        ("close", s.id),
+        ("remove", s.id),
+    ]
+    # ...and emit_data still recorded the bytes despite the raising hook.
+    assert s.bytes_rx == len(b"id\n")
+    assert any(b"id\n" in chunk for chunk in s.scrollback)
+
+
 def test_registry_load_history_bumps_next_id(sessions_dir):
     for i in (7, 13):
         r, w = _make_pair()
