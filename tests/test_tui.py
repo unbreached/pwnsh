@@ -77,6 +77,37 @@ def test_render_frame_title_and_target():
     assert "creds in .env" in target
 
 
+def test_ansi_to_text_strips_blink():
+    """Remote output (MOTDs, colored prompts, ls --color) often carries SGR 5/6
+    blink; we must neutralize it so the dashboard doesn't blink."""
+    from rich.style import Style
+
+    from pwnsh.tui.app import _ansi_to_text
+
+    t = _ansi_to_text("\x1b[1;5;31mALERT\x1b[0m ok \x1b[5mblinky\x1b[25m done")
+    assert "ALERT" in t.plain and "blinky" in t.plain  # text preserved
+    for span in t.spans:
+        st = span.style if isinstance(span.style, Style) else Style.parse(span.style)
+        assert not st.blink and not st.blink2  # blink removed everywhere
+
+
+def test_command_cursor_steady_and_output_wraps(free_port):
+    """UX guards: the prompt cursor must not blink, and the output pane must
+    wrap (no weird horizontal scrolling)."""
+
+    async def go():
+        app = _app(free_port)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from textual.widgets import Input, RichLog
+
+            assert app.query_one("#cmd", Input).cursor_blink is False
+            assert app.query_one("#scrollback", RichLog).wrap is True
+        return True
+
+    assert asyncio.run(go())
+
+
 def test_render_target_handles_missing_fingerprint():
     from pwnsh.session import Session
     from pwnsh.tui.app import _render_frame_title, _render_target

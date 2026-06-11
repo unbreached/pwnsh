@@ -6,7 +6,8 @@ import shlex
 import time
 from pathlib import Path
 
-from rich.text import Text
+from rich.style import Style
+from rich.text import Span, Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -101,6 +102,29 @@ HACKER_THEME = Theme(
 )
 
 
+_NO_BLINK = Style(blink=False, blink2=False)
+
+
+def _ansi_to_text(text: str) -> Text:
+    """Render terminal output as Rich Text with blink neutralized.
+
+    Remote MOTDs, colored prompts, and tools like `ls --color` frequently
+    emit SGR 5/6 (blink). Rich preserves it and Textual renders it as actual
+    blinking — obnoxious in the dashboard — so strip it from every span.
+    """
+    t = Text.from_ansi(text)
+    if t.spans:
+        t.spans = [
+            Span(
+                s.start,
+                s.end,
+                (s.style if isinstance(s.style, Style) else Style.parse(s.style)) + _NO_BLINK,
+            )
+            for s in t.spans
+        ]
+    return t
+
+
 class _ScrollbackLog(RichLog):
     """The output pane. It never takes keyboard focus itself — clicking
     anywhere in it hands focus straight to the command input, so the whole
@@ -167,7 +191,7 @@ class PwnshApp(App):
             with Vertical(id="sidebar"):  # border-title set in on_mount
                 yield DataTable(id="sessions", cursor_type="row", zebra_stripes=False)
             with Vertical(id="main"):  # border-title tracks the live session
-                yield _ScrollbackLog(id="scrollback", wrap=False, highlight=False, markup=False)
+                yield _ScrollbackLog(id="scrollback", wrap=True, highlight=False, markup=False)
                 with Horizontal(id="prompt-row"):
                     yield Static("❯", id="prompt-prefix", markup=True)
                     yield Input(placeholder="type a command · enter sends · /help", id="cmd")
@@ -196,6 +220,10 @@ class PwnshApp(App):
         table.add_column("OS", key="os", width=10)
         table.add_column("St", key="status", width=5)
         table.add_column("Up", key="uptime", width=6)
+
+        # Steady (non-blinking) command cursor — the blink is distracting in a
+        # terminal that's already streaming live output.
+        self.query_one("#cmd", Input).cursor_blink = False
 
         self.registry.on_add(self._on_session_add)
         self.registry.on_data(self._on_session_data)
@@ -359,7 +387,7 @@ class PwnshApp(App):
     def _append_scrollback(self, data: bytes) -> None:
         rich_log = self.query_one("#scrollback", RichLog)
         try:
-            rich_log.write(Text.from_ansi(data.decode("utf-8", errors="replace")))
+            rich_log.write(_ansi_to_text(data.decode("utf-8", errors="replace")))
         except Exception:
             rich_log.write(repr(data))
 
@@ -369,7 +397,7 @@ class PwnshApp(App):
         rich_log.clear()
         for chunk in s.scrollback:
             try:
-                rich_log.write(Text.from_ansi(chunk.decode("utf-8", errors="replace")))
+                rich_log.write(_ansi_to_text(chunk.decode("utf-8", errors="replace")))
             except Exception:
                 rich_log.write(repr(chunk))
 
