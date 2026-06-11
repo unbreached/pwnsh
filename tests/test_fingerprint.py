@@ -32,6 +32,32 @@ def test_pty_payload_is_os_branched_and_has_interactive_flag():
     assert "stty rows 40 cols 120" in payload
 
 
+def test_pty_payload_resolves_shell_and_verifies_spawn():
+    """Regression: the upgrade used to hard-code /bin/bash (via an un-exported
+    var), so it blew up on bash-less hosts and could falsely report success. The
+    payload must resolve an existing shell and ship a relay that VERIFIES the
+    spawn, emitting the fail marker on failure instead of a half-broken shell."""
+    import base64
+    import re
+
+    payload, _ready = pty_upgrade_payload(rows=40, cols=120)
+    fail = re.search(r"@@PW_PTY_FAIL_[0-9a-f]+@@", payload).group(0)
+
+    # No hard-coded bash path — the shell is resolved on-target with fallback.
+    assert "/bin/bash" not in payload
+    assert "command -v bash" in payload
+    assert "command -v sh" in payload
+
+    # The embedded relay decodes to valid Python that forks a pty, verifies the
+    # child survived exec (waitpid), and emits the fail marker itself.
+    b64 = re.search(r'b64decode\(\\"([A-Za-z0-9+/=]+)\\"\)', payload).group(1)
+    code = base64.b64decode(b64).decode()
+    compile(code, "<relay>", "exec")
+    assert "pty.fork" in code
+    assert "waitpid" in code
+    assert fail in code
+
+
 def test_fingerprinter_parses_sentinel_reply(free_port):
     async def go():
         reg = SessionRegistry()

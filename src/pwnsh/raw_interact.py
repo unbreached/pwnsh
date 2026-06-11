@@ -122,8 +122,14 @@ async def run_raw_bridge(
         with contextlib.suppress(Exception):
             termios.tcsetattr(fd_in, termios.TCSADRAIN, old_attr)
         session.remove_data_hook(on_data)
+        # A remote app (vim/htop/tmux) may have left the terminal in the alt
+        # screen, with bracketed paste enabled, the cursor hidden, or odd SGR
+        # state. Restoring termios doesn't undo any of that, so emit the resets
+        # — otherwise the operator's terminal looks "broken" after returning.
+        #   ?1049l exit alt screen · ?2004l bracketed-paste off · ?25h show
+        #   cursor · 0m reset attributes
         with contextlib.suppress(OSError):
-            os.write(fd_out, b"\r\n")
+            os.write(fd_out, b"\x1b[?1049l\x1b[?2004l\x1b[?25h\x1b[0m\r\n")
 
     if state["send_failed"]:
         return "send failed — session may have closed"

