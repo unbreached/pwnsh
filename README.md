@@ -104,8 +104,8 @@ LOLBins, DNS/TLS tunnels, encoding tricks, and blue-team detection signals.
 ### Clone and run (zero-touch, ideal over SSH)
 
 ```sh
-git clone https://github.com/syndis/Monkey-Business
-cd Monkey-Business/pwnsh
+git clone https://github.com/unbreached/pwnsh
+cd pwnsh
 ./run.sh
 ```
 

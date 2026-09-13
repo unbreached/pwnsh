@@ -99,8 +99,8 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - README: new "Clone and run" + "Running over SSH / inside tmux or screen"
-  sections; clone path updated to `syndis/Monkey-Business`.
-- `pyproject.toml`: author email + project URLs updated to Syndis.
+  sections; clone path updated.
+- `pyproject.toml`: author email + project URLs updated.
 
 ## [0.2.0] — 2026-04-25
 

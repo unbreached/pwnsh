@@ -5,7 +5,7 @@ description = "Multi-session reverse-shell handler with a console dashboard"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "David Jacoby", email = "david@syndis.is" }]
+authors = [{ name = "David Jacoby", email = "david@unbreached.se" }]
 keywords = [
     "security", "pentesting", "reverse-shell", "handler", "tui",
     "textual", "offensive-security", "red-team",
@@ -37,9 +37,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/syndis/Monkey-Business/tree/main/pwnsh"
-Issues = "https://github.com/syndis/Monkey-Business/issues"
-Changelog = "https://github.com/syndis/Monkey-Business/blob/main/pwnsh/CHANGELOG.md"
+Homepage = "https://github.com/unbreached/pwnsh"
+Issues = "https://github.com/unbreached/pwnsh/issues"
+Changelog = "https://github.com/unbreached/pwnsh/blob/main/CHANGELOG.md"
 
 [project.scripts]
 pwnsh = "pwnsh.__main__:main"

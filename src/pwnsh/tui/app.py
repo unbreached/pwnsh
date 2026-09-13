@@ -457,7 +457,7 @@ class PwnshApp(App):
             Text.from_markup(
                 f"[bold {C_ACCENT}]pwnsh[/]  [{C_DIM}]-[/]  "
                 f"[{C_TEXT}]multi-session reverse-shell handler[/]"
-                f"   [{C_DIM}]v{__version__} - David Jacoby - Syndis[/]"
+                f"   [{C_DIM}]v{__version__} - David Jacoby[/]"
             ),
             Text(""),
             row(f"{self.host}:{self.port}", state),
