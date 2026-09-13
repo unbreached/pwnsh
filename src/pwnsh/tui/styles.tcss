@@ -1,19 +1,42 @@
+/* pwnsh - graphite console theme (plain ASCII).
+   Palette comes from the registered "console" theme (see app.py):
+   $primary = cool cyan (chrome) - $accent = brightest off-white
+   $foreground = cool off-white body - $panel/$boost = graphite surfaces
+   $success = live-green - $error = red.
+   Frames use ASCII borders (+ - |) and scrollbars are hidden, so nothing
+   but plain ASCII and ANSI colour is ever drawn. */
+
 Screen {
     background: $background;
     color: $foreground;
+
+    /* Hide scrollbars entirely - they are the one bit of chrome Textual draws
+       with Unicode block glyphs. Output auto-scrolls to the bottom; history is
+       reachable via search (Ctrl+F). */
+    scrollbar-size-vertical: 0;
+    scrollbar-size-horizontal: 0;
 }
 
-/* ── body: left sidebar | right terminal, with breathing room ────── */
+/* PWNSH wordmark, pinned top-left. Plain ASCII, cyan, four rows tall. */
+#logo {
+    height: 4;
+    color: $primary;
+    text-style: bold;
+    background: $background;
+    padding: 0 1;
+}
+
+/* body: left sidebar | right terminal, with breathing room */
 #body {
     height: 1fr;
     padding: 1 1 0 1;
 }
 
-/* ── sidebar (framed) ─────────────────────────────────────────────── */
+/* sidebar (framed) */
 #sidebar {
     width: 36;
     background: $panel;
-    border: round $primary;
+    border: ascii #242c37;
     border-title-color: $primary;
     border-title-style: bold;
     padding: 0 1;
@@ -23,6 +46,7 @@ Screen {
 #sessions {
     height: 1fr;
     background: $panel;
+    scrollbar-size-horizontal: 0;
 }
 
 #sessions > .datatable--header {
@@ -32,8 +56,8 @@ Screen {
 }
 
 #sessions > .datatable--cursor {
-    background: $primary 25%;
-    color: $secondary;
+    background: $primary 20%;
+    color: $accent;
     text-style: bold;
 }
 
@@ -41,12 +65,13 @@ Screen {
     background: $boost;
 }
 
-/* ── main pane: the clickable terminal (framed) ──────────────────── */
+/* main pane: the terminal (framed) - a slightly brighter border so the
+   active pane reads as the focal point */
 #main {
     width: 1fr;
     background: $background;
-    border: round $primary;
-    border-title-color: $secondary;
+    border: ascii #33404e;
+    border-title-color: $accent;
     border-title-style: bold;
     padding: 0 1;
 }
@@ -55,10 +80,10 @@ Screen {
     height: 1fr;
     background: $background;
     margin-bottom: 1;   /* gap between output and the prompt */
-    overflow-x: hidden;  /* lines wrap (wrap=True) — never scroll sideways */
+    overflow-x: hidden;  /* lines wrap (wrap=True) - never scroll sideways */
 }
 
-/* ── integrated prompt row ───────────────────────────────────────── */
+/* integrated prompt row */
 #prompt-row {
     dock: bottom;
     height: 1;
@@ -71,7 +96,7 @@ Screen {
     min-width: 2;
     height: 1;
     background: $background;
-    color: $success;
+    color: $primary;
     text-style: bold;
     padding: 0 1 0 0;
 }
@@ -79,7 +104,7 @@ Screen {
 #cmd {
     height: 1;
     background: $background;
-    color: $foreground;
+    color: $accent;
     border: none;
     padding: 0;
 }
@@ -89,11 +114,11 @@ Screen {
     background: $background;
 }
 
-/* ── status panel: TARGET over LISTENER (framed) ─────────────────── */
+/* status panel: TARGET over LISTENER (framed) */
 #status {
     height: auto;
     background: $boost;
-    border: round $primary;
+    border: ascii #242c37;
     border-title-color: $primary;
     border-title-style: bold;
     padding: 0 1;
@@ -110,12 +135,12 @@ Screen {
     height: 2;
     background: $boost;
     color: $success;
-    border-top: solid $primary;
+    border-top: ascii #242c37;
     border-title-color: $primary;
     border-title-style: bold;
 }
 
-/* ── curated key bar (replaces Footer) ───────────────────────────── */
+/* curated key bar (replaces Footer) */
 #keybar {
     height: 1;
     background: $panel;

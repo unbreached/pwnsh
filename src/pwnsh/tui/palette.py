@@ -41,10 +41,11 @@ class PwnshCommands(Provider):
             DiscoveryHit("Search scrollback", app.action_search, help="Regex across every session (Ctrl+F)"),
             DiscoveryHit("Fingerprint target", app.action_fingerprint, help="Probe OS / user / shell"),
             DiscoveryHit("Upgrade to PTY", app.action_pty_upgrade, help="In-place pty.spawn wrapper (Ctrl+U)"),
-            DiscoveryHit("Reconnect with fresh PTY", app.action_pty_reconnect, help="Callback shell with a clean PTY — new session"),
-            DiscoveryHit("Raw interact (Ctrl+G)", app.action_raw_interact, help="Suspend TUI, raw stdin↔socket — vim/htop/tab/Ctrl-C work"),
+            DiscoveryHit("Reconnect with fresh PTY", app.action_pty_reconnect, help="Callback shell with a clean PTY - new session"),
+            DiscoveryHit("Raw interact (Ctrl+G)", app.action_raw_interact, help="Suspend TUI, raw stdin<->socket - vim/htop/tab/Ctrl-C work"),
             DiscoveryHit("Upload file (/put)", app.action_put_prompt, help="Send a local file to the target"),
             DiscoveryHit("Download file (/get)", app.action_get_prompt, help="Pull a remote file into loot"),
+            DiscoveryHit("Copy session output", app.action_copy_output, help="Copy scrollback to the clipboard via OSC 52 (Ctrl+Y)"),
             DiscoveryHit("Close and remove session", app.action_kill_session, help="Disconnect + drop from list (Ctrl+X)"),
             DiscoveryHit("Prune dead sessions", app.action_prune_dead, help="Remove every non-live session"),
             DiscoveryHit("Quit", app.action_request_quit, help="Exit pwnsh (confirms if sessions are live)"),
@@ -54,7 +55,7 @@ class PwnshCommands(Provider):
         app = self.ms_app
         for s in app.registry.all():
             fp = s.fingerprint.summary()
-            marker = {"alive": "●", "closed": "✗", "archived": "·"}.get(s.status, "")
+            marker = {"alive": "*", "closed": "x", "archived": "-"}.get(s.status, "")
             label = f"Switch to #{s.id} {marker} {s.label}"
             if fp:
                 label += f"  [{fp}]"

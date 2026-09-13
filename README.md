@@ -1,30 +1,37 @@
-# pwnsh
+<p align="center">
+  <img src="docs/pwnsh-mark.svg" width="116" alt="pwnsh logo — a terminal caret inside a hex socket">
+</p>
 
-> Multi-session reverse-shell handler with a terminal dashboard.
-> Think pwncat, but with search, replay, persistence, and a nicer TUI.
+<h1 align="center">pwnsh❯</h1>
+
+<p align="center"><em>Multi-session reverse-shell handler with a terminal dashboard.</em><br>
+Think pwncat, but with search, replay, persistence, and a nicer TUI.</p>
 
 ```
-╭─ SESSIONS ─────────╮╭─ #3 · web-prod-01 · ● LIVE ──────────────────────╮
-│ #1 ✗ old-box       ││ alice@victim-01:~$ id                            │
-│ #2 ● kiosk-07      ││ uid=1000(alice) gid=1000(alice) groups=1000      │
-│ #3 ● web-prod-01 ★ ││ alice@victim-01:~$ sudo -l                       │
-│ #4 · (archived)    ││ (bash) ALL : ALL NOPASSWD: /usr/bin/tar          │
-│                    ││                                                  │
-│                    ││ ❯ /put ~/tools/linpeas.sh /tmp/.x                │
-╰────────────────────╯╰──────────────────────────────────────────────────╯
-╭─ TARGET ───────────────────────────────────────────────────────────────╮
-│ alice@victim-01 · Linux · /bin/bash · /home/alice · rx 12.3K tx 842B    │
-│─ LISTENER ──────────────────────────────────────────────────────────────│
-│ ● 0.0.0.0:9090 · 2 live · 2 archived · #3 fingerprinted                 │
-╰─────────────────────────────────────────────────────────────────────────╯
- ^q quit  ^n/^p cycle  ^f search  ^u pty  ^g raw  ^x kill  f2 rename  ^k palette
++- SESSIONS ---------++- #3 - web-prod-01 - * LIVE -----------------------+
+| #1 x old-box       || alice@victim-01:~$ id                             |
+| #2 * kiosk-07      || uid=1000(alice) gid=1000(alice) groups=1000       |
+| #3 * web-prod-01   || alice@victim-01:~$ sudo -l                        |
+| #4 - (archived)    || (bash) ALL : ALL NOPASSWD: /usr/bin/tar           |
+|                    ||                                                   |
+|                    || > /put ~/tools/linpeas.sh /tmp/.x                 |
++--------------------++---------------------------------------------------+
++- TARGET ------------------------------------------------------------+
+| alice@victim-01 - Linux - /bin/bash - /home/alice - rx 12.3K tx 842B |
+|- LISTENER ----------------------------------------------------------|
+| * 0.0.0.0:9090 - 2 live - 2 archived - #3 fingerprinted             |
++--------------------------------------------------------------------+
+ ^q quit | ^n/^p cycle | ^f search | ^u pty | ^g raw | ^x kill | ^y copy | ^k palette
 ```
 
-The right pane is one terminal: **click anywhere in the output and start
-typing** — the prompt is always focused, and a click brings focus back to it.
-The live session's name and status ride the terminal's frame title; the framed
-**TARGET** / **LISTENER** panel below carries the fingerprint, byte counters,
-and listener/debug line.
+The UI is deliberately **plain ASCII only** — no box-drawing or block glyphs,
+nothing wide or ambiguous-width to misalign a terminal — and it runs with the
+**mouse disabled**. The command prompt stays focused, so you just type and press
+Enter to drive the live session. Because the mouse is off, your terminal keeps
+its own selection: **drag to select and copy** the payload or any output the
+normal way, or press `Ctrl+Y` / run `/copy`. The live session's name and status
+ride the terminal's frame title; the framed **TARGET** / **LISTENER** panel below
+carries the fingerprint, byte counters, and listener/debug line.
 
 ---
 
@@ -83,8 +90,10 @@ usable file transfer and a dashboard that doesn't get in the way.
   wipes every non-live one.
 - **Recorded evidence** — every session becomes a v2 asciinema `.cast`,
   replayable with `asciinema play`.
-- **Hacker theme** — dark charcoal with cyan / phosphor / amber / hot-pink
-  accents, done as a proper Textual theme.
+- **Graphite console theme** — a cool near-neutral instrument: deep graphite
+  ground, soft off-white type, one calm cyan for all chrome, and status hues
+  reserved for meaning (green live, red dead, dim archived). A proper Textual
+  theme, plus a copy path (`Ctrl+Y` / `/copy`) that works over SSH via OSC 52.
 
 Companion cheat sheet: [`docs/REVERSE_SHELLS.md`](docs/REVERSE_SHELLS.md) —
 payloads for bash, nc, python, PHP, Flask SSTI, PowerShell, Go, msfvenom,

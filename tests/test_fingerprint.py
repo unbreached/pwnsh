@@ -58,7 +58,9 @@ def test_pty_payload_resolves_shell_and_verifies_spawn():
     assert fail in code
 
 
-def test_fingerprinter_parses_sentinel_reply(free_port):
+def test_fingerprinter_parses_id_uname_reply(free_port):
+    """The probe is now a plain `id; uname -a` (no sentinels). User comes from the
+    id line, OS + hostname from the uname -a line; shell/cwd are no longer probed."""
     async def go():
         reg = SessionRegistry()
         listener = TCPListener(reg, host="127.0.0.1", port=free_port)
@@ -74,15 +76,10 @@ def test_fingerprinter_parses_sentinel_reply(free_port):
                         if not data:
                             return
                         buf += data
-                        if b"@@PWFPBEGIN@@" in buf and b"<SENT>" not in buf:
+                        if b"uname -a" in buf and b"<SENT>" not in buf:
                             w.write(
-                                b"@@PWFPBEGIN@@\n"
-                                b"Linux 6.5 x86_64\n"
-                                b"uid=1000(alice) gid=1000(alice) groups=1000\n"
-                                b"victim01\n"
-                                b"/bin/bash\n"
-                                b"/home/alice\n"
-                                b"@@PWFPEND@@\n"
+                                b"uid=1000(alice) gid=1000(alice) groups=1000(alice)\n"
+                                b"Linux victim01 6.5.0-1-amd64 #1 SMP x86_64 GNU/Linux\n"
                             )
                             await w.drain()
                             buf += b"<SENT>"
@@ -108,8 +105,6 @@ def test_fingerprinter_parses_sentinel_reply(free_port):
     assert fp.os == "Linux"
     assert fp.user == "alice"
     assert fp.hostname == "victim01"
-    assert fp.shell == "/bin/bash"
-    assert fp.cwd == "/home/alice"
 
 
 def _drive_pty_sync(emit: str, free_port: int) -> tuple[bool, str]:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import os
 import shlex
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -14,6 +17,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.events import Click
 from textual.reactive import reactive
+from textual.suggester import Suggester
 from textual.theme import Theme
 from textual.widgets import DataTable, Input, RichLog, Static
 
@@ -30,6 +34,12 @@ from ..payloads import KINDS as PAYLOAD_KINDS
 from ..payloads import generate as generate_payload
 from ..raw_interact import run_raw_bridge
 from ..session import Session, SessionRegistry
+from ..complete import (
+    RemoteLister,
+    complete_local,
+    parse_completion_target,
+    pick,
+)
 from ..transfer import get_file, put_file
 from .modals import ConfirmModal, PromptModal, SearchHit, SearchModal
 from .palette import PwnshCommands
@@ -51,7 +61,7 @@ def _is_dumb_terminal() -> bool:
 
 
 def _detect_multiplexer() -> str | None:
-    """Return 'tmux', 'screen', or None — used to surface a key-collision tip."""
+    """Return 'tmux', 'screen', or None - used to surface a key-collision tip."""
     if os.environ.get("TMUX") or os.environ.get("TERM", "").startswith("tmux"):
         return "tmux"
     if os.environ.get("STY") or os.environ.get("TERM", "").startswith("screen"):
@@ -59,9 +69,24 @@ def _detect_multiplexer() -> str | None:
     return None
 
 
-# Compact (~36 col) ASCII header — fits inside the main pane on 80-col SSH
-# terminals after the 38-col sidebar. Rendered into the scrollback via the
-# operator banner. Pure ASCII so it renders on dumb terminals too.
+# -- graphite console palette -----------------------------------------
+# A cool, near-neutral instrument rather than a themed "look": deep graphite
+# ground, soft off-white text, and ONE calm cyan for all chrome (titles, keys,
+# focus, the prompt, the mark). Status hues stay out of the chrome so state
+# reads at a glance and nothing competes with it - green=live, red=dead/danger,
+# dim=archived. This is what I'd ship for a tool an operator stares at for hours.
+C_ACCENT = "#54c7de"  # chrome accent - cool cyan (titles, keys, prompt, mark)
+C_HI     = "#eaf0f6"  # brightest text - wordmark, active values
+C_TEXT   = "#c3ccd8"  # body text - cool off-white
+C_DIM    = "#697585"  # muted - labels, separators
+C_LIVE   = "#5fd88a"  # live sessions - signal green
+C_ERR    = "#e5624a"  # dead / danger / errors - red
+C_BG     = "#0c0f14"  # deep cool graphite ground
+
+# ASCII wordmark for the waiting screen. Deliberately plain ASCII only - no
+# box-drawing or block glyphs - so it renders identically in every terminal,
+# multiplexer, and console font (bare TTYs included), with no wide/ambiguous
+# characters to misalign the layout. ~36 cols, fits an 80-col terminal.
 _BANNER_ART = [
     r" ___  __      __  _  _   ___   _  _ ",
     r"| _ \ \ \ /\ / / | \| | / __| | || |",
@@ -70,13 +95,13 @@ _BANNER_ART = [
 ]
 
 
-# Curated key hints — replaces Textual's Footer, which surfaced the focused
+# Curated key hints - replaces Textual's Footer, which surfaced the focused
 # Input's own edit bindings (e.g. "^k delete-to-end") and looked cluttered.
 def _key(k: str, label: str) -> str:
-    return f"[bold #00d4ff]{k}[/] [#c5d4e0]{label}[/]"
+    return f"[bold {C_ACCENT}]{k}[/] [{C_DIM}]{label}[/]"
 
 
-_KEYBAR = "  ".join(
+_KEYBAR = f"  [{C_DIM}]|[/]  ".join(
     _key(k, label)
     for k, label in (
         ("^q", "quit"), ("^n/^p", "cycle"), ("^f", "search"), ("^u", "pty"),
@@ -85,19 +110,19 @@ _KEYBAR = "  ".join(
 )
 
 
-HACKER_THEME = Theme(
-    name="hacker",
-    primary="#00d4ff",
-    secondary="#5af78e",
-    accent="#ff3864",
-    success="#5af78e",
-    warning="#ffb454",
-    error="#ff3864",
-    foreground="#c5d4e0",
-    background="#0a0e12",
-    surface="#0a0e12",
-    panel="#101820",
-    boost="#182028",
+CONSOLE_THEME = Theme(
+    name="console",
+    primary=C_ACCENT,
+    secondary=C_TEXT,
+    accent=C_HI,
+    success=C_LIVE,
+    warning="#e0a852",
+    error=C_ERR,
+    foreground=C_TEXT,
+    background=C_BG,
+    surface=C_BG,
+    panel="#12171f",
+    boost="#1a212b",
     dark=True,
 )
 
@@ -110,7 +135,7 @@ def _ansi_to_text(text: str) -> Text:
 
     Remote MOTDs, colored prompts, and tools like `ls --color` frequently
     emit SGR 5/6 (blink). Rich preserves it and Textual renders it as actual
-    blinking — obnoxious in the dashboard — so strip it from every span.
+    blinking - obnoxious in the dashboard - so strip it from every span.
     """
     t = Text.from_ansi(text)
     if t.spans:
@@ -126,7 +151,7 @@ def _ansi_to_text(text: str) -> Text:
 
 
 class _ScrollbackLog(RichLog):
-    """The output pane. It never takes keyboard focus itself — clicking
+    """The output pane. It never takes keyboard focus itself - clicking
     anywhere in it hands focus straight to the command input, so the whole
     right-hand pane behaves like one terminal you click into and type at.
     The mouse wheel still scrolls it regardless of focus.
@@ -141,6 +166,55 @@ class _ScrollbackLog(RichLog):
             pass
 
 
+class _PathSuggester(Suggester):
+    """Ghost-text path completion for the command bar (accept with Right arrow).
+
+    Fires only on ``/put`` and ``/get`` arguments; every other input returns no
+    suggestion, so ordinary commands typed to the shell are untouched.
+
+    * ``/put <local>`` completes against the local filesystem (synchronous).
+    * ``/get <remote>`` and ``/put``'s second argument complete against the
+      target, best-effort: the first keystroke into a directory runs one ``ls``
+      over the session (visible briefly in the pane) and the result is cached
+      per (session, directory), so further keystrokes filter locally with no
+      extra round-trips. Remote completion is silently unavailable when no live
+      session is selected, during raw-interact, or on a shell that can't run the
+      probe.
+    """
+
+    def __init__(self, app: PwnshApp) -> None:
+        super().__init__(use_cache=True, case_sensitive=True)
+        self._app = app
+        # (session id, directory-fragment) -> entry names. Bounded in practice by
+        # the number of distinct directories tab-completed within a session.
+        self._dir_cache: dict[tuple[int, str], list[str]] = {}
+
+    async def get_suggestion(self, value: str) -> str | None:
+        parsed = parse_completion_target(value)
+        if parsed is None:
+            return None
+        head, token, scope = parsed
+        if scope == "local":
+            completed = complete_local(token)
+        else:
+            completed = await self._complete_remote(token)
+        return head + completed if completed else None
+
+    async def _complete_remote(self, token: str) -> str | None:
+        s = self._app.current_session()
+        if s is None or not s.is_live or self._app._raw_active:
+            return None
+        dirpart, _sep, _leaf = token.rpartition("/")
+        key = (s.id, dirpart)
+        names = self._dir_cache.get(key)
+        if names is None:
+            names = await RemoteLister(s).list_dir(dirpart)
+            if names is None:
+                return None  # probe failed/timed out - don't cache the failure
+            self._dir_cache[key] = names
+        return pick(token, names)
+
+
 class PwnshApp(App):
     CSS_PATH = "styles.tcss"
     TITLE = "pwnsh"
@@ -150,7 +224,7 @@ class PwnshApp(App):
     COMMAND_PALETTE_BINDING = "ctrl+k"
 
     # priority=True so these always fire even though the command Input is the
-    # default-focused widget — otherwise Textual's Input would swallow ctrl+u
+    # default-focused widget - otherwise Textual's Input would swallow ctrl+u
     # (delete-to-start) and ctrl+k (delete-to-end) before we ever saw them.
     BINDINGS = [
         Binding("ctrl+n", "next_session", "Next", show=True, priority=True),
@@ -162,9 +236,10 @@ class PwnshApp(App):
         Binding("ctrl+u", "pty_upgrade", "PTY", show=True, priority=True),
         Binding("ctrl+g", "raw_interact", "Raw", show=True, priority=True),
         Binding("ctrl+x", "kill_session", "Kill", show=True, priority=True),
+        Binding("ctrl+y", "copy_output", "Copy", show=True, priority=True),
         Binding("ctrl+k", "command_palette", "Palette", show=True, priority=True),
         Binding("ctrl+q", "request_quit", "Quit", show=True, priority=True),
-        # NB: Esc is deliberately NOT bound to quit at the app level — it is far
+        # NB: Esc is deliberately NOT bound to quit at the app level - it is far
         # too easy to hit by reflex and silently drop every live session. Esc
         # still dismisses modals (each modal binds it locally).
     ]
@@ -185,16 +260,27 @@ class PwnshApp(App):
         self._load_history = load_history
         self._status_msg = ""  # most recent notification, mirrored to the status bar
         self._raw_active = False  # True while suspended for raw-interact mode
+        # Incremental UTF-8 decoder for the pane currently on screen. Keeping
+        # decoder state across socket reads means a multibyte char split across
+        # two 4 KiB chunks renders correctly instead of as replacement glyphs.
+        # Reset whenever the displayed session changes (see _repaint_scrollback).
+        self._live_decoder: codecs.IncrementalDecoder | None = None
 
     def compose(self) -> ComposeResult:
+        # Persistent PWNSH wordmark, top-left. Plain ASCII, left-aligned.
+        yield Static("\n".join(_BANNER_ART), id="logo", markup=False)
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):  # border-title set in on_mount
                 yield DataTable(id="sessions", cursor_type="row", zebra_stripes=False)
             with Vertical(id="main"):  # border-title tracks the live session
                 yield _ScrollbackLog(id="scrollback", wrap=True, highlight=False, markup=False)
                 with Horizontal(id="prompt-row"):
-                    yield Static("❯", id="prompt-prefix", markup=True)
-                    yield Input(placeholder="type a command · enter sends · /help", id="cmd")
+                    yield Static(">", id="prompt-prefix", markup=True)
+                    yield Input(
+                        placeholder="type a command - enter sends - /help",
+                        id="cmd",
+                        suggester=_PathSuggester(self),
+                    )
         # Framed status panel: TARGET (fingerprint) over LISTENER (listener/debug).
         with Vertical(id="status"):
             yield Static("", id="status-target", markup=True)
@@ -205,8 +291,8 @@ class PwnshApp(App):
         ensure_dirs()
         if not _is_dumb_terminal():
             try:
-                self.register_theme(HACKER_THEME)
-                self.theme = "hacker"
+                self.register_theme(CONSOLE_THEME)
+                self.theme = "console"
             except Exception:
                 pass
         # Static panel frame titles.
@@ -221,7 +307,7 @@ class PwnshApp(App):
         table.add_column("St", key="status", width=5)
         table.add_column("Up", key="uptime", width=6)
 
-        # Steady (non-blinking) command cursor — the blink is distracting in a
+        # Steady (non-blinking) command cursor - the blink is distracting in a
         # terminal that's already streaming live output.
         self.query_one("#cmd", Input).cursor_blink = False
 
@@ -246,7 +332,7 @@ class PwnshApp(App):
         self.query_one("#cmd", Input).focus()
 
     async def on_unmount(self) -> None:
-        """Graceful shutdown — flush logs, close sockets."""
+        """Graceful shutdown - flush logs, close sockets."""
         try:
             await self.listener.stop()
         except Exception:
@@ -254,16 +340,18 @@ class PwnshApp(App):
         self.registry.close_all()
 
     def notify(self, message: str, *args, **kwargs) -> None:
-        """Also mirror the toast into the persistent bottom debug line, so a
-        notification that has already faded is still recoverable at a glance."""
+        """Route messages to the plain-ASCII LISTENER status line instead of a
+        pop-up toast. Textual toasts are bordered boxes (a graphic); the status
+        line keeps everything to plain text, and the latest message stays
+        visible instead of fading. ``*args``/``**kwargs`` (e.g. ``severity``)
+        are accepted for call compatibility and ignored."""
         self._status_msg = message
         try:
             self._refresh_status()
         except Exception:
             pass
-        return super().notify(message, *args, **kwargs)
 
-    # ── session helpers ───────────────────────────────────────────
+    # -- session helpers -------------------------------------------
     def current_session(self) -> Session | None:
         if self.selected_id is None:
             return None
@@ -280,7 +368,7 @@ class PwnshApp(App):
         except Exception:
             pass
 
-    # ── registry callbacks ────────────────────────────────────────
+    # -- registry callbacks ----------------------------------------
     def _on_session_add(self, s: Session) -> None:
         table = self.query_one("#sessions", DataTable)
         try:
@@ -289,7 +377,7 @@ class PwnshApp(App):
                 s.label,
                 s.fingerprint.os or "",
                 _status_cell(s.status),
-                "0s" if s.status == "alive" else "—",
+                "0s" if s.status == "alive" else "-",
                 key=str(s.id),
             )
         except Exception:
@@ -298,11 +386,15 @@ class PwnshApp(App):
             cur = self.current_session()
             if cur is None or cur.status != "alive":
                 self.select_session(s.id)
-            self.notify(f"⚡ session #{s.id} from {s.remote[0]}:{s.remote[1]}")
+            try:
+                self.bell()  # ring the terminal so a landed shell is noticed
+            except Exception:
+                pass
+            self.notify(f"[!] new shell - session #{s.id} from {s.remote[0]}:{s.remote[1]}")
             self._run_fingerprint(s, auto=True)
 
     def _on_session_data(self, s: Session, data: bytes) -> None:
-        # During raw-interact the app is suspended — touching widgets here can
+        # During raw-interact the app is suspended - touching widgets here can
         # raise and (before the reader loop was hardened) kill the session.
         # Output still reaches the terminal via the raw bridge's own hook, and
         # we repaint from scrollback on return. So skip the TUI update entirely.
@@ -331,78 +423,105 @@ class PwnshApp(App):
                 self._refresh_status()
                 self._update_prompt()
 
-    # ── rendering ─────────────────────────────────────────────────
+    # -- rendering -------------------------------------------------
     def _show_banner(self) -> None:
-        """Operator info block, written into the scrollback when no session
-        is selected. Shows the project header, listener, data dir, archive
-        count, key cheatsheet, and a tmux/screen tip when relevant."""
+        """Waiting-room screen, written into the scrollback when no session is
+        selected. The PWNSH wordmark lives permanently in the top-left #logo
+        band, so here we lead straight with the listening state, then the one
+        thing a new user needs - a copy-paste payload to catch a shell -
+        followed by file-transfer, key, and multiplexer hints."""
         rich_log = self.query_one("#scrollback", RichLog)
         rich_log.clear()
         archived = sum(1 for s in self.registry.all() if s.status != "alive")
         live = sum(1 for s in self.registry.all() if s.status == "alive")
         muxer = _detect_multiplexer()
 
-        for art_line in _BANNER_ART:
-            rich_log.write(Text.from_markup(f"[bold #00d4ff]{art_line}[/]"))
+        def row(label: str, value: str) -> Text:
+            return Text.from_markup(f"[{C_DIM}]{label:<12}[/] {value}")
 
-        for line in [
+        # Listening state - the headline of the empty screen.
+        if live:
+            state = (
+                f"[bold {C_LIVE}]*[/] [bold {C_ACCENT}]{live} LIVE[/]"
+                f"   [{C_DIM}]select a session on the left[/]"
+            )
+        else:
+            state = (
+                f"[bold {C_LIVE}]*[/] [bold {C_ACCENT}]LISTENING[/]"
+                f"   [{C_DIM}]waiting for a shell to connect...[/]"
+            )
+
+        example = generate_payload("bash", self.host, self.port) or ""
+        lines = [
             Text(""),
             Text.from_markup(
-                f"[bold #5af78e][ PWNSH ][/]  [dim]//[/]  "
-                f"[#c5d4e0]David Jacoby[/] [dim]—[/] [#c5d4e0]Syndis · 2026[/]  "
-                f"[dim]· v{__version__}[/]"
+                f"[bold {C_ACCENT}]pwnsh[/]  [{C_DIM}]-[/]  "
+                f"[{C_TEXT}]multi-session reverse-shell handler[/]"
+                f"   [{C_DIM}]v{__version__} - David Jacoby - Syndis[/]"
             ),
             Text(""),
-            Text.from_markup(f"[#5af78e]listener[/]   [#c5d4e0]{self.host}:{self.port}[/]"),
-            Text.from_markup(f"[#5af78e]data    [/]   [#c5d4e0]{DATA_DIR}[/]"),
-            Text.from_markup(
-                f"[#5af78e]sessions[/]   [#c5d4e0]{live} live  ·  {archived} archived[/]"
-            ),
+            row(f"{self.host}:{self.port}", state),
+            row("data", f"[{C_TEXT}]{DATA_DIR}[/]"),
+            row("sessions", f"[{C_TEXT}]{live} live[/]  [{C_DIM}]-[/]  [{C_TEXT}]{archived} archived[/]"),
             Text(""),
             Text.from_markup(
-                "[#5af78e]keys    [/]   [#c5d4e0]ctrl+n/p next/prev   ctrl+f search   "
-                "ctrl+u pty   ctrl+g raw[/]"
+                f"[{C_DIM}]catch a shell - run this on the target "
+                f"([/][bold {C_ACCENT}]^Y[/][{C_DIM}] copies it to your clipboard):[/]"
             ),
-            Text.from_markup(
-                "[#5af78e]        [/]   [#c5d4e0]ctrl+x kill          ctrl+k palette  "
-                "ctrl+q quit[/]"
-            ),
-            Text.from_markup(
-                "[#5af78e]slash   [/]   [#c5d4e0]/put /get /tag /note /pty /fp /kill /prune /payload /help[/]"
-            ),
-        ]:
+            Text.from_markup(f"  [bold {C_HI}]{example}[/]"),
+            Text.from_markup(f"  [{C_DIM}]/payload nc|python|powershell|perl|ruby for other variants (also copied)[/]"),
+            Text(""),
+            row("files", f"[{C_TEXT}]/put <local> \\[remote][/]   [{C_DIM}]send a file to the target[/]"),
+            row("", f"[{C_TEXT}]/get <remote>[/]           [{C_DIM}]pull a file into loot/[/]"),
+            Text(""),
+            row("keys", f"[{C_ACCENT}]^N/^P[/] [{C_DIM}]switch[/]   [{C_ACCENT}]^F[/] [{C_DIM}]search[/]   "
+                        f"[{C_ACCENT}]^U[/] [{C_DIM}]pty[/]   [{C_ACCENT}]^G[/] [{C_DIM}]raw[/]"),
+            row("", f"[{C_ACCENT}]^X[/] [{C_DIM}]kill[/]      [{C_ACCENT}]^K[/] [{C_DIM}]palette[/]  "
+                    f"[{C_ACCENT}]^Q[/] [{C_DIM}]quit[/]   [{C_DIM}]/help for everything[/]"),
+        ]
+        for line in lines:
             rich_log.write(line)
 
         if muxer:
             rich_log.write(Text(""))
-            rich_log.write(Text.from_markup(
-                f"[#ffb454]tip     [/]   [#c5d4e0]inside {muxer} — pwnsh keys do not collide "
-                f"with the {muxer} prefix.[/]"
-            ))
-            rich_log.write(Text.from_markup(
-                "[#ffb454]        [/]   [#c5d4e0]raw-interact (ctrl+g) needs a real tty; "
-                "exit it with ctrl+g if it locks up.[/]"
+            rich_log.write(row(
+                "tip",
+                f"[{C_TEXT}]inside {muxer} - pwnsh keys don't collide with the "
+                f"{muxer} prefix. raw mode (^G) needs a real tty.[/]",
             ))
 
     def _append_scrollback(self, data: bytes) -> None:
         rich_log = self.query_one("#scrollback", RichLog)
+        if self._live_decoder is None:
+            self._live_decoder = codecs.getincrementaldecoder("utf-8")("replace")
         try:
-            rich_log.write(_ansi_to_text(data.decode("utf-8", errors="replace")))
+            text = self._live_decoder.decode(data)
+            if text:
+                rich_log.write(_ansi_to_text(text))
         except Exception:
             rich_log.write(repr(data))
 
     def _repaint_scrollback(self, s: Session) -> None:
-        """Clear the pane and replay a session's full scrollback into it."""
+        """Clear the pane and replay a session's full scrollback into it.
+
+        Decodes the whole buffer through a single incremental decoder so chunk
+        boundaries never split a multibyte character, then keeps that decoder as
+        the live one so subsequent streamed bytes continue from the same state.
+        """
         rich_log = self.query_one("#scrollback", RichLog)
         rich_log.clear()
-        for chunk in s.scrollback:
-            try:
-                rich_log.write(_ansi_to_text(chunk.decode("utf-8", errors="replace")))
-            except Exception:
+        dec = codecs.getincrementaldecoder("utf-8")("replace")
+        try:
+            text = dec.decode(b"".join(s.scrollback))
+            if text:
+                rich_log.write(_ansi_to_text(text))
+        except Exception:
+            for chunk in s.scrollback:
                 rich_log.write(repr(chunk))
+        self._live_decoder = dec
 
     def _refresh_status(self) -> None:
-        """Update the framed status panel — the main pane's title, the TARGET
+        """Update the framed status panel - the main pane's title, the TARGET
         (fingerprint) line, and the LISTENER (listener / debug) line."""
         try:
             main = self.query_one("#main")
@@ -419,9 +538,9 @@ class PwnshApp(App):
         archived = sum(1 for x in self.registry.all() if x.status != "alive")
         msg = self._status_msg or "ready"
         lst.update(
-            f"[bold #5af78e]●[/] [#5af78e]{self.host}:{self.port}[/]"
-            f"   [#c5d4e0]{live} live · {archived} archived[/]"
-            f"   [dim]· {msg}[/]"
+            f"[bold {C_LIVE}]*[/] [{C_ACCENT}]{self.host}:{self.port}[/]"
+            f"   [{C_TEXT}]{live} live[/] [{C_DIM}]-[/] [{C_TEXT}]{archived} archived[/]"
+            f"   [{C_DIM}]- {msg}[/]"
         )
 
     def _update_prompt(self) -> None:
@@ -429,14 +548,14 @@ class PwnshApp(App):
         cmd = self.query_one("#cmd", Input)
         s = self.current_session()
         if s is None:
-            prefix.update("[dim]❯[/]")
-            cmd.placeholder = f"no session — listening on :{self.port}"
+            prefix.update("[dim]>[/]")
+            cmd.placeholder = f"no session - listening on :{self.port}"
         elif s.status == "alive":
-            prefix.update("[bold #00d4ff]❯[/]")
-            cmd.placeholder = "type a command · enter sends · /help"
+            prefix.update(f"[bold {C_ACCENT}]>[/]")
+            cmd.placeholder = "type a command - enter sends - /help"
         else:
-            prefix.update("[dim]❯[/]")
-            cmd.placeholder = f"[{s.status}] — read-only · /tag /note /kill"
+            prefix.update("[dim]>[/]")
+            cmd.placeholder = f"[{s.status}] - read-only - /tag /note /kill"
 
     def _refresh_table(self) -> None:
         table = self.query_one("#sessions", DataTable)
@@ -449,7 +568,7 @@ class PwnshApp(App):
                 table.update_cell(key, "status", _status_cell(s.status))
                 table.update_cell(
                     key, "uptime",
-                    _fmt_uptime(now - s.connected_at) if s.status == "alive" else "—",
+                    _fmt_uptime(now - s.connected_at) if s.status == "alive" else "-",
                 )
             except Exception:
                 continue
@@ -465,7 +584,7 @@ class PwnshApp(App):
         self._refresh_status()
         self._update_prompt()
 
-    # ── events ────────────────────────────────────────────────────
+    # -- events ----------------------------------------------------
     @on(DataTable.RowHighlighted)
     def _row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if event.row_key is None or event.row_key.value is None:
@@ -486,7 +605,7 @@ class PwnshApp(App):
         if s is None:
             return
         if not s.is_live:
-            self.notify("session is not live — can't send", severity="warning")
+            self.notify("session is not live - can't send", severity="warning")
             return
         try:
             await s.send((raw + "\n").encode())
@@ -541,6 +660,8 @@ class PwnshApp(App):
             self.action_search()
         elif cmd == "payload":
             self._show_payload(args[0] if args else "")
+        elif cmd == "copy":
+            self.action_copy_output()
         else:
             self.notify(f"unknown slash command: /{cmd}", severity="warning")
 
@@ -558,23 +679,23 @@ class PwnshApp(App):
         line = generate_payload(kind, self.host, self.port)
         if line is None:
             self.notify(
-                f"unknown payload kind {kind!r} — try one of: {', '.join(PAYLOAD_KINDS)}",
+                f"unknown payload kind {kind!r} - try one of: {', '.join(PAYLOAD_KINDS)}",
                 severity="warning",
             )
             return
         rich_log.write(Text(""))
         rich_log.write(Text.from_markup(
-            f"[bold #00d4ff]── payload ({kind}) → {self.host}:{self.port} ──[/]"
+            f"[bold {C_ACCENT}]-- payload ({kind}) -> {self.host}:{self.port} --[/]"
         ))
-        rich_log.write(Text(line, style="#5af78e"))
+        rich_log.write(Text(line, style=C_HI))
         rich_log.write(Text.from_markup(
-            "[dim]select with mouse to copy. /payload again for another type.[/]"
+            f"[{C_DIM}]copied to clipboard - paste onto the target. /payload for another type.[/]"
         ))
-        self.notify(f"payload ({kind}) printed — host:port baked in")
+        self._copy_clipboard(line, f"{kind} payload")
 
     def _show_help(self) -> None:
         rich_log = self.query_one("#scrollback", RichLog)
-        rich_log.write(Text("──── pwnsh commands ────", style="bold #00d4ff"))
+        rich_log.write(Text("---- pwnsh commands ----", style=f"bold {C_ACCENT}"))
         for line in [
             "  /put <local> [remote]   upload a file (base64 heredoc, sha256 verify)",
             "  /get <remote>           download a file to ~/.pwnsh/loot/",
@@ -584,15 +705,32 @@ class PwnshApp(App):
             "  /fp                     re-run fingerprint probe",
             "  /kill                   disconnect + remove current   (Ctrl+X)",
             "  /prune                  remove every non-live session",
-            "  /payload <kind>         print a host:port-stamped one-liner (bash, python, nc, …)",
+            "  /payload <kind>         print + copy a host:port-stamped one-liner (bash, python, nc, ...)",
+            "  /copy                   copy this session's output to the clipboard (Ctrl+Y)",
             "  Ctrl+N / Ctrl+P         next / previous session",
             "  Ctrl+F                  search scrollback across all sessions",
             "  Ctrl+K                  command palette",
             "  Ctrl+Q                  quit (confirms if a session is live)",
         ]:
-            rich_log.write(Text(line, style="#c5d4e0"))
+            rich_log.write(Text(line, style=C_TEXT))
+        rich_log.write(Text(
+            "  copy: mouse is off, so select text and copy the normal way,",
+            style=C_DIM,
+        ))
+        rich_log.write(Text(
+            "        or press Ctrl+Y / run /copy to send it to the clipboard.",
+            style=C_DIM,
+        ))
+        rich_log.write(Text(
+            "  paths: /put and /get complete filenames as you type - press the",
+            style=C_DIM,
+        ))
+        rich_log.write(Text(
+            "         right arrow to accept. /get probes the target (best-effort).",
+            style=C_DIM,
+        ))
 
-    # ── actions ───────────────────────────────────────────────────
+    # -- actions ---------------------------------------------------
     def action_request_quit(self) -> None:
         """Quit, but confirm first if it would disconnect live sessions."""
         live = self.registry.live()
@@ -635,9 +773,93 @@ class PwnshApp(App):
             if hit is None:
                 return
             self.select_session(hit.session_id)
-            self.notify(f"→ #{hit.session_id}")
+            self.notify(f"-> #{hit.session_id}")
 
         self.push_screen(SearchModal(self.registry), handle)
+
+    def action_copy_output(self) -> None:
+        """Copy something useful to the clipboard.
+
+        The dashboard captures the mouse (so a click can focus the prompt),
+        which disables the terminal's native drag-to-select - so provide a
+        one-key copy instead. With a session selected it copies that session's
+        scrollback; on the waiting screen it copies the ready-to-paste bash
+        reverse-shell one-liner shown in the banner, which is the thing an
+        operator most wants to grab there.
+        """
+        s = self.current_session()
+        if s is None:
+            payload = generate_payload("bash", self.host, self.port) or ""
+            self._copy_clipboard(payload, "bash payload")
+            return
+        text = b"".join(s.scrollback).decode("utf-8", errors="replace")
+        self._copy_clipboard(text, f"#{s.id} output")
+
+    def _copy_clipboard(self, text: str, what: str) -> None:
+        """Copy text to the clipboard by two independent routes, because either
+        one alone fails silently in common setups:
+
+        * OSC 52 (Textual's ``copy_to_clipboard``) reaches the operator's
+          clipboard *through the terminal*, so it works over SSH - but only if
+          the terminal supports and allows it (Apple Terminal never does; tmux
+          needs ``set -g set-clipboard on``).
+        * A local clipboard tool (``pbcopy``/``wl-copy``/``xclip``/``xsel``)
+          works on the box pwnsh runs on regardless of the terminal, but not
+          across SSH.
+
+        Trying both means "copy" just works whether you're local or remote.
+        """
+        if not text:
+            self.notify(f"nothing to copy ({what})", severity="warning")
+            return
+        methods: list[str] = []
+        try:
+            self.copy_to_clipboard(text)  # OSC 52 - SSH-friendly, may no-op
+            methods.append("osc52")
+        except Exception:
+            pass
+        tool = self._system_clipboard_copy(text)
+        if tool:
+            methods.append(tool)
+        if methods:
+            self.notify(
+                f"copied {what} -> clipboard ({len(text)} chars - {', '.join(methods)})"
+            )
+        else:
+            self.notify(
+                "no clipboard reachable - install pbcopy/xclip/xsel/wl-copy, or "
+                "hold Shift and drag (Option+drag on macOS) to select manually",
+                severity="warning",
+            )
+
+    @staticmethod
+    def _system_clipboard_copy(text: str) -> str | None:
+        """Pipe text to a local OS clipboard tool. Returns the tool name on
+        success, else None. Never raises."""
+        if sys.platform == "darwin":
+            candidates = [["pbcopy"]]
+        elif sys.platform.startswith(("linux", "freebsd", "openbsd", "netbsd")):
+            candidates = []
+            if os.environ.get("WAYLAND_DISPLAY"):
+                candidates.append(["wl-copy"])
+            candidates.append(["xclip", "-selection", "clipboard"])
+            candidates.append(["xsel", "--clipboard", "--input"])
+            candidates.append(["wl-copy"])  # last resort even without the env var
+        elif sys.platform == "win32":
+            candidates = [["clip"]]
+        else:
+            candidates = []
+        data = text.encode("utf-8", errors="replace")
+        for cmd in candidates:
+            try:
+                subprocess.run(
+                    cmd, input=data, timeout=3, check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                return cmd[0]
+            except (FileNotFoundError, OSError, subprocess.SubprocessError):
+                continue
+        return None
 
     def action_set_tag(self) -> None:
         s = self.current_session()
@@ -720,7 +942,7 @@ class PwnshApp(App):
         s.save_meta()
         self._refresh_status()
         self._update_prompt()
-        self.notify(f"renamed → {tag or '(cleared)'}")
+        self.notify(f"renamed -> {tag or '(cleared)'}")
 
     def _apply_note(self, note: str) -> None:
         s = self.current_session()
@@ -751,7 +973,7 @@ class PwnshApp(App):
             self.notify(f"#{s.id} fingerprint: no response", severity="warning")
 
     async def action_raw_interact(self) -> None:
-        """Suspend Textual, drop the local tty into raw mode, and pipe stdin↔socket
+        """Suspend Textual, drop the local tty into raw mode, and pipe stdin<->socket
         directly until Ctrl+G is pressed. Inside, full interactive use of vim,
         htop, tab completion, history, Ctrl+C, etc."""
         s = self.current_session()
@@ -768,7 +990,7 @@ class PwnshApp(App):
             return
         finally:
             self._raw_active = False
-        # We suppressed live scrollback updates while suspended — repaint the
+        # We suppressed live scrollback updates while suspended - repaint the
         # pane from the session's scrollback so the TUI catches up on the
         # bytes that flowed during raw mode.
         self._repaint_scrollback(s)
@@ -780,7 +1002,7 @@ class PwnshApp(App):
     async def action_pty_reconnect(self, target: str = "") -> None:
         """Send a callback-PTY payload that opens a fresh socket back to us
         with a real PTY around bash. The new connection lands as a brand-new
-        session — the current dumb session stays alive."""
+        session - the current dumb session stays alive."""
         s = self.current_session()
         if s is None or not s.is_live:
             self.notify("need a live session to issue reconnect", severity="warning")
@@ -810,7 +1032,7 @@ class PwnshApp(App):
             self.notify(f"#{s.id} reconnect-PTY send failed: {e}", severity="error")
             return
         self.notify(
-            f"#{s.id} reconnect-PTY dispatched → {host}:{port} — watch sidebar for new session"
+            f"#{s.id} reconnect-PTY dispatched -> {host}:{port} - watch sidebar for new session"
         )
 
     @work(exclusive=False)
@@ -822,7 +1044,7 @@ class PwnshApp(App):
         size = self.size
         rows = max(24, size.height)
         cols = max(80, size.width)
-        self.notify(f"#{s.id} upgrading PTY ({rows}×{cols})…")
+        self.notify(f"#{s.id} upgrading PTY ({rows}x{cols})...")
         ok, msg = await PtyUpgrader(s, rows=rows, cols=cols, shell=shell).run()
         self.notify(
             f"#{s.id} {msg}",
@@ -842,7 +1064,7 @@ class PwnshApp(App):
                 return
             self._do_put(Path(parts[0]), parts[1] if len(parts) > 1 else None)
 
-        self.push_screen(PromptModal("Upload — local [remote]:"), handle)
+        self.push_screen(PromptModal("Upload - local [remote]:"), handle)
 
     def action_get_prompt(self) -> None:
         def handle(value: str | None) -> None:
@@ -850,7 +1072,7 @@ class PwnshApp(App):
                 return
             self._do_get(value.strip())
 
-        self.push_screen(PromptModal("Download — remote path:"), handle)
+        self.push_screen(PromptModal("Download - remote path:"), handle)
 
     @work(exclusive=False)
     async def _do_put(self, local: Path, remote: str | None) -> None:
@@ -858,7 +1080,7 @@ class PwnshApp(App):
         if s is None or not s.is_live:
             self.notify("need a live session", severity="warning")
             return
-        self.notify(f"#{s.id} uploading {local}…")
+        self.notify(f"#{s.id} uploading {local}...")
         result = await put_file(s, local, remote)
         self.notify(
             f"#{s.id} {result.message}",
@@ -871,7 +1093,7 @@ class PwnshApp(App):
         if s is None or not s.is_live:
             self.notify("need a live session", severity="warning")
             return
-        self.notify(f"#{s.id} downloading {remote}…")
+        self.notify(f"#{s.id} downloading {remote}...")
         result = await get_file(s, remote)
         self.notify(
             f"#{s.id} {result.message}",
@@ -879,9 +1101,14 @@ class PwnshApp(App):
         )
 
 
-# ── helpers ──────────────────────────────────────────────────────────
-def _status_cell(status: str) -> str:
-    return {"alive": "●", "closed": "✗", "archived": "·"}.get(status, status)
+# -- helpers ----------------------------------------------------------
+def _status_cell(status: str) -> Text:
+    glyph, color = {
+        "alive": ("*", C_LIVE),
+        "closed": ("x", C_ERR),
+        "archived": ("-", C_DIM),
+    }.get(status, (status, C_TEXT))
+    return Text(glyph, style=color)
 
 
 def _fmt_uptime(seconds: float) -> str:
@@ -908,38 +1135,38 @@ def _fmt_bytes(n: int) -> str:
 
 
 def _render_frame_title(s: Session | None) -> str:
-    """Plain-text title for the main terminal frame: #id · label · status."""
+    """Plain-text title for the main terminal frame: #id - label - status."""
     if s is None:
         return " no session "
-    word = {"alive": "● LIVE", "closed": "✗ CLOSED", "archived": "· ARCHIVED"}.get(
+    word = {"alive": "* LIVE", "closed": "x CLOSED", "archived": "- ARCHIVED"}.get(
         s.status, s.status
     )
-    return f" #{s.id} · {s.label} · {word} "
+    return f" #{s.id} - {s.label} - {word} "
 
 
 def _render_target(s: Session) -> str:
-    """TARGET line: fingerprint (user@host · OS · shell · cwd) + byte counters
+    """TARGET line: fingerprint (user@host - OS - shell - cwd) + byte counters
     + note marker. Markup, dot-separated, clipped to one row."""
     fp = s.fingerprint
     if fp.is_empty():
-        body = "[dim]no fingerprint yet — /fp to probe · ctrl+u for PTY[/]"
+        body = "[dim]no fingerprint yet - /fp to probe - ctrl+u for PTY[/]"
     else:
         bits = []
         who = f"{fp.user}@{fp.hostname}" if fp.user and fp.hostname else (fp.user or fp.hostname)
         if who:
-            bits.append(f"[#5af78e]{who}[/]")
+            bits.append(f"[bold {C_ACCENT}]{who}[/]")
         if fp.os:
-            bits.append(f"[#c5d4e0]{fp.os}[/]")
+            bits.append(f"[{C_TEXT}]{fp.os}[/]")
         if fp.shell:
-            bits.append(f"[dim]{fp.shell}[/]")
+            bits.append(f"[{C_DIM}]{fp.shell}[/]")
         if fp.cwd:
-            bits.append(f"[dim]{fp.cwd}[/]")
-        body = "  [dim]·[/]  ".join(bits)
+            bits.append(f"[{C_DIM}]{fp.cwd}[/]")
+        body = f"  [{C_DIM}]-[/]  ".join(bits)
     counters = (
-        f"[dim]rx[/] [#c5d4e0]{_fmt_bytes(s.bytes_rx)}[/] "
-        f"[dim]tx[/] [#c5d4e0]{_fmt_bytes(s.bytes_tx)}[/]"
+        f"[{C_DIM}]rx[/] [{C_TEXT}]{_fmt_bytes(s.bytes_rx)}[/] "
+        f"[{C_DIM}]tx[/] [{C_TEXT}]{_fmt_bytes(s.bytes_tx)}[/]"
     )
     line = f"{body}   {counters}"
     if s.note:
-        line += f"   [#ffb454]✎ {s.note}[/]"
+        line += f"   [{C_ACCENT}]~ {s.note}[/]"
     return line

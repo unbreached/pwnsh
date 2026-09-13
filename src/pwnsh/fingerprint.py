@@ -9,10 +9,6 @@ import shlex
 from ._scan import StreamScanner
 from .session import Session
 
-_SENTINEL_PREFIX = "@@PWFP"
-_BEGIN = f"{_SENTINEL_PREFIX}BEGIN@@"
-_END = f"{_SENTINEL_PREFIX}END@@"
-
 # Hosts get interpolated into shell + python one-liners (see callback_pty_payload),
 # so restrict them to the characters that appear in IPv4/IPv6 literals and DNS
 # names. A stray quote, space, or shell metacharacter is rejected rather than
@@ -33,55 +29,56 @@ def validate_target(host: str, port: int) -> str | None:
     return None
 
 
-_PROBE_SH = (
-    f"echo {_BEGIN}; "
-    "uname -srm 2>/dev/null; "
-    "id 2>/dev/null; "
-    "hostname 2>/dev/null; "
-    "echo \"$SHELL\"; "
-    "pwd 2>/dev/null; "
-    f"echo {_END}"
+# Minimal connect-time probe: exactly `id; uname -a`, nothing else. No sentinels
+# and no extra commands, so a freshly-landed shell isn't buried under probe
+# noise - the reply reads like a command you'd have typed anyway.
+_PROBE_SH = "id; uname -a"
+
+_UID_RE = re.compile(r"uid=\d+\(([^)]+)\)")
+# uname -a starts with the kernel name then the nodename (hostname). Anchored per
+# line so a surrounding prompt or MOTD doesn't throw the parse off.
+_UNAME_RE = re.compile(
+    r"^(Linux|Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly|SunOS|"
+    r"CYGWIN\S*|MINGW\S*|MSYS\S*)\s+(\S+)\b.*$",
+    re.MULTILINE,
 )
 
 
 class Fingerprinter:
-    """Collects incoming bytes until the sentinel window is complete, then parses."""
+    """Sends `id; uname -a` and parses user / OS / hostname from the reply.
+
+    No sentinels: the probe is exactly what an operator types first, so its output
+    reads naturally in the pane instead of being wrapped in marker noise. Parsing
+    is best-effort and tolerant of a surrounding prompt or MOTD.
+    """
 
     def __init__(self, session: Session) -> None:
         self.session = session
-        self._scan = StreamScanner()
-        self._begin = _BEGIN.encode()
-        self._end = _END.encode()
+        self._buf = bytearray()
         self._done = asyncio.Event()
+        self._got_user = False
+        self._got_os = False
 
     def _on_data(self, session: Session, data: bytes) -> None:
-        self._scan.feed(data)
-        i = self._scan.find(self._begin)
-        if i < 0:
-            return
-        start = i + len(self._begin)
-        stop = self._scan.find(self._end, start)
-        if stop < 0:
-            return
-        self._parse(self._scan.text(start, stop))
-        self._done.set()
+        self._buf += data
+        self._parse(self._buf.decode("utf-8", errors="replace"))
+        if self._got_user and self._got_os:
+            self._done.set()
 
-    def _parse(self, block: str) -> None:
-        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+    def _parse(self, text: str) -> None:
         fp = self.session.fingerprint
-        if not lines:
-            return
-        fp.kernel = lines[0] if len(lines) >= 1 else ""
-        fp.os = _guess_os(fp.kernel)
-        if len(lines) >= 2:
-            m = re.search(r"uid=\d+\(([^)]+)\)", lines[1])
-            fp.user = m.group(1) if m else lines[1]
-        if len(lines) >= 3:
-            fp.hostname = lines[2]
-        if len(lines) >= 4:
-            fp.shell = lines[3]
-        if len(lines) >= 5:
-            fp.cwd = lines[4]
+        if not self._got_user:
+            m = _UID_RE.search(text)
+            if m:
+                fp.user = m.group(1)
+                self._got_user = True
+        if not self._got_os:
+            m = _UNAME_RE.search(text)
+            if m:
+                fp.kernel = m.group(0).strip()
+                fp.os = _guess_os(m.group(1))
+                fp.hostname = m.group(2)
+                self._got_os = True
         self.session.save_meta()
 
     async def run(self, timeout: float = 4.0) -> bool:
@@ -92,7 +89,8 @@ class Fingerprinter:
                 await asyncio.wait_for(self._done.wait(), timeout=timeout)
                 return True
             except TimeoutError:
-                return False
+                # A partial parse (user OR os) is still a usable result.
+                return self._got_user or self._got_os
         finally:
             self.session.remove_data_hook(self._on_data)
 

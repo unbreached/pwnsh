@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="pwnsh">
+  <title>pwnsh</title>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="14" fill="#0c0f14" stroke="#242c37"/>
+  <g transform="translate(10,10) scale(0.44)">
+    <polygon points="94,50 72,88.1 28,88.1 6,50 28,11.9 72,11.9"
+             fill="none" stroke="#54c7de" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M37 31 L56 50 L37 69" fill="none" stroke="#eaf0f6" stroke-width="9"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="61" y="42" width="7" height="16" rx="1" fill="#54c7de"/>
+  </g>
+</svg>

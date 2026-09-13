@@ -95,7 +95,11 @@ def main() -> None:
         host=args.bind,
         load_history=not args.no_history,
     )
-    app.run()
+    # mouse=False: pwnsh is a keyboard-driven tool. Leaving the mouse alone means
+    # the terminal keeps its own click-drag selection and copy (so you can select
+    # the payload / output the normal way), and pwnsh emits less terminal-control
+    # state — one fewer thing to leave the terminal wedged on a rough exit.
+    app.run(mouse=False)
 
 
 if __name__ == "__main__":
