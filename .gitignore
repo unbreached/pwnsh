@@ -19,3 +19,8 @@ build/
 .claude/
 .idea/
 .vscode/
+# vim/editor swap + backup files
+*.swp
+*.swo
+*.swn
+*~
