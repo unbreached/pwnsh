@@ -1,7 +1,7 @@
 [project]
 name = "pwnsh"
-version = "0.4.0"
-description = "Multi-session reverse-shell handler with a console dashboard"
+version = "0.7.0"
+description = "Multi-session reverse-shell handler with a terminal dashboard"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

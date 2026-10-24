@@ -77,6 +77,12 @@ def main() -> None:
         help="don't load archived sessions from ~/.pwnsh/sessions/ on startup",
     )
     parser.add_argument(
+        "--udp",
+        action="store_true",
+        help="also demux UDP on the same host:port - each datagram source "
+        "(src_ip, src_port) becomes a virtual session",
+    )
+    parser.add_argument(
         "-V",
         "--version",
         action="version",
@@ -94,6 +100,7 @@ def main() -> None:
         port=args.port,
         host=args.bind,
         load_history=not args.no_history,
+        udp=args.udp,
     )
     # mouse=False: pwnsh is a keyboard-driven tool. Leaving the mouse alone means
     # the terminal keeps its own click-drag selection and copy (so you can select

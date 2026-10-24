@@ -141,7 +141,7 @@ class RemoteLister:
             await self.session.send(cmd.encode())
             try:
                 await asyncio.wait_for(done.wait(), timeout=timeout)
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 return None
         except Exception:
             return None
@@ -152,21 +152,32 @@ class RemoteLister:
         return [n for n in names if n and n not in ("./", "../")]
 
 
+# Upload / download commands and their aliases. The command word decides which
+# side of the connection a path argument is completed against.
+_UPLOAD_CMDS = ("put", "upload")
+_DOWNLOAD_CMDS = ("get", "download")
+
+
 def parse_completion_target(value: str) -> tuple[str, str, str] | None:
     """Classify what, if anything, to complete in the command-bar ``value``.
 
     Returns ``(head, token, scope)`` where ``head`` is the untouched text before
     the fragment (so the caller returns ``head + completion`` to the widget),
     ``token`` is the fragment being typed, and ``scope`` is ``"local"`` or
-    ``"remote"``. Returns ``None`` when the value is not a completable ``/put`` /
-    ``/get`` argument (including the empty fragment right after the command).
+    ``"remote"``. Returns ``None`` when the value is not a completable upload /
+    download argument (including the empty fragment right after the command).
 
-    ``/get`` always completes remotely. ``/put`` completes its first argument
-    locally and its optional second argument (the remote destination) remotely.
+    Upload (``/put``, alias ``/upload``) completes its first argument locally and
+    its optional second argument (the remote destination) remotely. Download
+    (``/get``, alias ``/download``) always completes remotely. The command word
+    is matched case-insensitively but ``head`` keeps its original spelling.
     """
-    if value[:5].lower() not in ("/put ", "/get "):
+    if not value.startswith("/") or " " not in value:
         return None
-    cmd = value[1:4].lower()
+    first, _sep, _rest = value.partition(" ")
+    cmd = first[1:].lower()
+    if cmd not in _UPLOAD_CMDS and cmd not in _DOWNLOAD_CMDS:
+        return None
     last_space = value.rfind(" ")
     token = value[last_space + 1 :]
     if not token:
@@ -174,7 +185,7 @@ def parse_completion_target(value: str) -> tuple[str, str, str] | None:
     head = value[: last_space + 1]
     # Words before the fragment, minus the command word, give the argument index.
     arg_index = len(value[:last_space].split()) - 1
-    if cmd == "get":
+    if cmd in _DOWNLOAD_CMDS:
         scope = "remote"
     else:
         scope = "local" if arg_index == 0 else "remote"

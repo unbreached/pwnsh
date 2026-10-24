@@ -4,6 +4,61 @@ All notable changes to pwnsh are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Full-terminal mode** (`F3`, or `/full` / `/zoom`) hides both side panels so
+  the shell pane fills the width; `F3` again restores them.
+- **Persistent ACTIONS menu** - a framed right-hand panel listing every action
+  with its key, grouped by Session / Shell / Files / View / More.
+- Command aliases `/upload` (= `/put`) and `/download` (= `/get`), with the same
+  path completion.
+
+### Changed
+- **Dashboard reworked to a symmetric three-column layout**: a centered `pwnsh`
+  title bar on top and the `TARGET` / `LISTENER` status panel below frame the
+  body; inside, the terminal sits between the `SESSIONS` sidebar and the
+  `ACTIONS` menu. The old top-left wordmark band and single key bar are gone
+  (the wordmark now heads the waiting screen). The `ACTIONS` panel auto-hides
+  below ~100 columns so the terminal keeps a usable width.
+
+### Fixed
+- Package version corrected to `0.7.0` (`pyproject.toml` still read `0.4.0`).
+- `Session.send` no longer races to create two send locks under concurrent
+  callers; the lock is created once when the session's log opens.
+- `load_history` now isolates observer-callback failures like `add()` does, so a
+  broken TUI or plugin callback can't abort startup.
+- Output pane no longer draws a dark scrollbar strip over its right edge.
+
+## [0.7.0] - 2026-09-13
+
+### Added
+- **Loot vault** - `/get` now stores files in a content-addressed vault
+  (`~/.pwnsh/vault/`), sha256-deduped across hosts and sessions; per-session
+  loot dirs become hardlinks into it. `/loot` shows objects, references, and
+  bytes saved by dedup.
+- **UDP pseudo-sessions** - `--udp` demuxes one UDP socket into virtual sessions
+  keyed by `(src_ip, src_port)`, alongside the TCP listener.
+- **Plugin API** - hot-reloadable Python plugins under `~/.pwnsh/plugins/`
+  (a `Plugin` base with `on_connect` / `on_data` / `commands` hooks); `/reload`
+  and `/plugins` at runtime.
+- Clipboard copy that works with or without OSC 52
+  (pbcopy/xclip/xsel/wl-copy): `Ctrl+Y`, `/copy`, and auto-copied `/payload`.
+
+### Changed
+- **UI reworked to a plain-ASCII graphite console**: cool cyan chrome, status
+  hues reserved for meaning, ASCII borders, `>` prompt, a top-left PWNSH
+  wordmark, mouse disabled (the terminal keeps native selection/copy), and
+  pop-up toasts removed in favour of the status line.
+- Connect probe trimmed to `id; uname -a` (no sentinels); user / OS / hostname
+  parsed from the reply.
+- Removed Syndis references; author email and project URLs point at
+  `unbreached/pwnsh`.
+
+### Notes
+- v3 roadmap: the three self-contained items (loot vault, UDP demux, plugin API)
+  shipped here. Multi-operator daemon attach and pivot / SOCKS5 remain.
+
 ## [0.4.0] — 2026-06-07
 
 ### Changed

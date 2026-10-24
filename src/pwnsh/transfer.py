@@ -12,6 +12,7 @@ from pathlib import Path
 from ._scan import StreamScanner
 from .config import LOOT_DIR
 from .session import Session
+from .vault import LootVault
 
 
 def _sentinel(tag: str) -> str:
@@ -149,19 +150,26 @@ async def get_file(
     # is empty (e.g. remote was "/" or "..") so we never try to clobber the dir.
     name = Path(remote).name or f"download-{session.id:04d}.bin"
     loot_dir = LOOT_DIR / f"session-{session.id:04d}"
+    host = session.fingerprint.hostname or session.remote[0]
     try:
+        # Content-addressed store: dedup identical bytes across hosts/sessions,
+        # then hardlink a named copy into the per-session loot dir for convenience.
+        vault = LootVault()
+        stored = vault.store(
+            payload, host=host, session_id=session.id, remote_path=remote, name=name
+        )
         loot_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(loot_dir, 0o700)
         dest = loot_dir / name
-        dest.write_bytes(payload)
-        os.chmod(dest, 0o600)
+        vault.link_into(dest, stored.sha256)
     except OSError as e:
         return TransferResult(False, sha256=digest, message=f"cannot write loot: {e}")
+    where = "dedup - already in vault" if stored.deduped else "new in vault"
     return TransferResult(
         True,
         path=dest,
         sha256=digest,
-        message=f"downloaded {len(payload)} B → {dest}",
+        message=f"downloaded {len(payload)} B -> {dest} ({where})",
     )
 
 

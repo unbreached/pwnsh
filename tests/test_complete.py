@@ -22,6 +22,15 @@ def test_parse_classifies_put_and_get():
     assert parse_completion_target("/PUT ~/x") == ("/PUT ", "~/x", "local")
 
 
+def test_parse_classifies_upload_download_aliases():
+    # /upload behaves like /put, /download like /get - including arg scoping
+    # and case-insensitive command matching with the head left verbatim.
+    assert parse_completion_target("/upload ~/too") == ("/upload ", "~/too", "local")
+    assert parse_completion_target("/upload a.txt /tm") == ("/upload a.txt ", "/tm", "remote")
+    assert parse_completion_target("/download /etc/pa") == ("/download ", "/etc/pa", "remote")
+    assert parse_completion_target("/DOWNLOAD /x") == ("/DOWNLOAD ", "/x", "remote")
+
+
 @pytest.mark.parametrize(
     "value", ["/get ", "/put ", "/put", "ls -la", "", "/getx a", "/putter a"]
 )

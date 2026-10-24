@@ -30,26 +30,35 @@ def test_app_mounts_with_banner(free_port):
     assert asyncio.run(go())
 
 
-def test_layout_is_framed_panels_plus_status_and_keybar(free_port):
-    """Framed sidebar + terminal, a TARGET/LISTENER status box, and a curated
-    key bar — no standalone session-header / session-info / Footer widgets."""
+def test_layout_is_symmetric_three_column(free_port):
+    """Full-width title bar + TARGET/LISTENER status frame the body; inside, the
+    terminal sits between a SESSIONS sidebar and an ACTIONS menu. No standalone
+    session-header / session-info / Footer / key-bar widgets."""
 
     async def go():
         app = _app(free_port)
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=(120, 36)) as pilot:
             await pilot.pause()
             for wid in (
+                "#header", "#header-state",
                 "#body", "#sidebar", "#main", "#scrollback", "#cmd",
-                "#prompt-prefix", "#status", "#status-target", "#status-listener",
-                "#keybar",
+                "#prompt-prefix", "#actions", "#actions-body",
+                "#status", "#status-target", "#status-listener",
             ):
                 assert app.query(wid), f"missing {wid}"
-            # the old stacked panels are gone
+            # the old widgets are gone
             assert not app.query("#session-header")
             assert not app.query("#session-info")
+            assert not app.query("#keybar")
+            assert not app.query("#logo")
             # framed panels carry ASCII titles
+            assert app.query_one("#header").border_title == "pwnsh"
             assert app.query_one("#sidebar").border_title == "SESSIONS"
+            assert app.query_one("#actions").border_title == "ACTIONS"
             assert app.query_one("#status").border_title == "TARGET"
+            # the actions menu surfaces keys + labels
+            actions = str(app.query_one("#actions-body").render())
+            assert "palette" in actions and "pty" in actions
             # listener line shows live/archived counts
             assert "live" in str(app.query_one("#status-listener").render())
         return True
@@ -171,6 +180,29 @@ def test_clicking_output_focuses_prompt_and_typing_works(free_port):
             return cmd.value
 
     assert asyncio.run(go()) == "id"
+
+
+def test_fullscreen_toggle_hides_and_restores_side_panels(free_port):
+    """F3 hides both side panels (full-terminal mode); F3 again restores them."""
+
+    async def go():
+        app = _app(free_port)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await pilot.pause()
+            sidebar = app.query_one("#sidebar")
+            actions = app.query_one("#actions")
+            assert sidebar.display and actions.display  # wide terminal: both shown
+            await pilot.press("f3")
+            await pilot.pause()
+            assert not sidebar.display and not actions.display
+            assert app._focus_mode is True
+            await pilot.press("f3")
+            await pilot.pause()
+            assert sidebar.display and actions.display
+            assert app._focus_mode is False
+        return True
+
+    assert asyncio.run(go())
 
 
 def test_escape_does_not_quit_the_app(free_port):

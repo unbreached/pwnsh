@@ -46,6 +46,7 @@ class PwnshCommands(Provider):
             DiscoveryHit("Upload file (/put)", app.action_put_prompt, help="Send a local file to the target"),
             DiscoveryHit("Download file (/get)", app.action_get_prompt, help="Pull a remote file into loot"),
             DiscoveryHit("Copy session output", app.action_copy_output, help="Copy scrollback to the clipboard via OSC 52 (Ctrl+Y)"),
+            DiscoveryHit("Toggle full-terminal mode", app.action_toggle_fullscreen, help="Hide/show the side panels - terminal fills the width (F3)"),
             DiscoveryHit("Close and remove session", app.action_kill_session, help="Disconnect + drop from list (Ctrl+X)"),
             DiscoveryHit("Prune dead sessions", app.action_prune_dead, help="Remove every non-live session"),
             DiscoveryHit("Quit", app.action_request_quit, help="Exit pwnsh (confirms if sessions are live)"),

@@ -4,7 +4,11 @@
    $foreground = cool off-white body - $panel/$boost = graphite surfaces
    $success = live-green - $error = red.
    Frames use ASCII borders (+ - |) and scrollbars are hidden, so nothing
-   but plain ASCII and ANSI colour is ever drawn. */
+   but plain ASCII and ANSI colour is ever drawn.
+
+   Layout is symmetric: a full-width title bar on top and the TARGET/LISTENER
+   status panel on the bottom frame the body; inside, the terminal sits
+   centered between two mirrored side panels (SESSIONS | terminal | ACTIONS). */
 
 Screen {
     background: $background;
@@ -17,16 +21,26 @@ Screen {
     scrollbar-size-horizontal: 0;
 }
 
-/* PWNSH wordmark, pinned top-left. Plain ASCII, cyan, four rows tall. */
-#logo {
-    height: 4;
-    color: $primary;
-    text-style: bold;
-    background: $background;
-    padding: 0 1;
+/* Full-width centered title bar. */
+#header {
+    height: 3;
+    background: $panel;
+    border: ascii $primary;
+    border-title-color: $primary;
+    border-title-style: bold;
+    border-title-align: center;
+    margin: 0 1;
 }
 
-/* body: left sidebar | right terminal, with breathing room */
+#header-state {
+    width: 1fr;
+    height: 1;
+    background: $panel;
+    content-align: center middle;
+    text-align: center;
+}
+
+/* body: SESSIONS | terminal | ACTIONS, with breathing room */
 #body {
     height: 1fr;
     padding: 1 1 0 1;
@@ -34,7 +48,7 @@ Screen {
 
 /* sidebar (framed) */
 #sidebar {
-    width: 36;
+    width: 32;
     background: $panel;
     border: ascii #242c37;
     border-title-color: $primary;
@@ -81,6 +95,9 @@ Screen {
     background: $background;
     margin-bottom: 1;   /* gap between output and the prompt */
     overflow-x: hidden;  /* lines wrap (wrap=True) - never scroll sideways */
+    /* No scrollbar gutter: RichLog would otherwise draw a dark vertical track
+       over the right edge of the output. History is reached via search (^F). */
+    scrollbar-size: 0 0;
 }
 
 /* integrated prompt row */
@@ -114,6 +131,25 @@ Screen {
     background: $background;
 }
 
+/* ACTIONS menu (framed) - mirrors the sidebar on the right. Auto-hidden on
+   narrow terminals (see _apply_responsive) so the terminal keeps its width;
+   the palette (^K) and /help still surface every action there. */
+#actions {
+    width: 22;
+    background: $panel;
+    border: ascii #242c37;
+    border-title-color: $primary;
+    border-title-style: bold;
+    padding: 0 1;
+    margin-left: 1;
+}
+
+#actions-body {
+    height: 1fr;
+    background: $panel;
+    color: $foreground;
+}
+
 /* status panel: TARGET over LISTENER (framed) */
 #status {
     height: auto;
@@ -138,12 +174,4 @@ Screen {
     border-top: ascii #242c37;
     border-title-color: $primary;
     border-title-style: bold;
-}
-
-/* curated key bar (replaces Footer) */
-#keybar {
-    height: 1;
-    background: $panel;
-    color: $foreground;
-    padding: 0 1;
 }

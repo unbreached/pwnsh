@@ -8,21 +8,28 @@
 Think pwncat, but with search, replay, persistence, and a nicer TUI.</p>
 
 ```
-+- SESSIONS ---------++- #3 - web-prod-01 - * LIVE -----------------------+
-| #1 x old-box       || alice@victim-01:~$ id                             |
-| #2 * kiosk-07      || uid=1000(alice) gid=1000(alice) groups=1000       |
-| #3 * web-prod-01   || alice@victim-01:~$ sudo -l                        |
-| #4 - (archived)    || (bash) ALL : ALL NOPASSWD: /usr/bin/tar           |
-|                    ||                                                   |
-|                    || > /put ~/tools/linpeas.sh /tmp/.x                 |
-+--------------------++---------------------------------------------------+
-+- TARGET ------------------------------------------------------------+
-| alice@victim-01 - Linux - /bin/bash - /home/alice - rx 12.3K tx 842B |
-|- LISTENER ----------------------------------------------------------|
-| * 0.0.0.0:9090 - 2 live - 2 archived - #3 fingerprinted             |
-+--------------------------------------------------------------------+
- ^q quit | ^n/^p cycle | ^f search | ^u pty | ^g raw | ^x kill | ^y copy | ^k palette
++========================== pwnsh =============================+
++- SESSIONS ---+- #3 - web-prod-01 - * LIVE --------+- ACTIONS -+
+| #1 x old-box | alice@victim-01:~$ id              | SESSION   |
+| #2 * kiosk-07| uid=1000(alice) gid=1000(alice)    |  ^N/^P ...|
+| #3 * web-prod| alice@victim-01:~$ sudo -l         | SHELL     |
+| #4 - (arch.) | (bash) ALL : ALL NOPASSWD: tar     |  ^U pty   |
+|              |                                    | FILES     |
+|              | > /put ~/tools/linpeas.sh /tmp/.x  |  /put ... |
++- TARGET -----+------------------------------------+- VIEW ----+
+| alice@victim-01 - Linux - /bin/bash - rx 12.3K tx 842B        |
+|- LISTENER ----------------------------------------------------|
+| * 0.0.0.0:9090 - 2 live - 2 archived - #3 fingerprinted       |
++--------------------------------------------------------------+
 ```
+
+The layout is symmetric: a centered **pwnsh** title bar on top and the framed
+**TARGET** / **LISTENER** panel on the bottom frame the body; inside, the live
+terminal sits between a **SESSIONS** sidebar and an **ACTIONS** menu that lists
+every action with its key, so nothing has to be memorised. Press **`F3`** (or
+`/full`) for full-terminal mode — both side panels hide and the shell fills the
+width. The `ACTIONS` panel also auto-hides on terminals narrower than ~100
+columns.
 
 The UI is deliberately **plain ASCII only** — no box-drawing or block glyphs,
 nothing wide or ambiguous-width to misalign a terminal — and it runs with the
@@ -30,8 +37,7 @@ nothing wide or ambiguous-width to misalign a terminal — and it runs with the
 Enter to drive the live session. Because the mouse is off, your terminal keeps
 its own selection: **drag to select and copy** the payload or any output the
 normal way, or press `Ctrl+Y` / run `/copy`. The live session's name and status
-ride the terminal's frame title; the framed **TARGET** / **LISTENER** panel below
-carries the fingerprint, byte counters, and listener/debug line.
+ride the terminal's frame title.
 
 ---
 
@@ -199,6 +205,7 @@ A session appears in the sidebar. In the TUI:
 | `Ctrl+U`       | PTY upgrade (in-place)                  |
 | `Ctrl+G`       | raw-interact mode (vim / htop / tab / Ctrl+C work) |
 | `Ctrl+F`       | global scrollback search (regex)        |
+| `F3`           | full-terminal mode (hide/show side panels) |
 | `Ctrl+K`       | command palette                         |
 | `Ctrl+X`       | kill + remove current session (confirms) |
 | `Ctrl+Q`       | quit (confirms if any session is live)  |
@@ -214,13 +221,14 @@ Type into the bottom input.
 | Command               | Purpose                                                |
 | --------------------- | ------------------------------------------------------ |
 | `/help`               | list commands inside the scrollback                    |
-| `/put <local> [remote]` | upload a file                                        |
-| `/get <remote>`       | download a file to `~/.pwnsh/loot/session-NNNN/`  |
+| `/put <local> [remote]` (or `/upload`) | upload a file                       |
+| `/get <remote>` (or `/download`) | download a file to `~/.pwnsh/loot/session-NNNN/` |
 | `/tag <name>` (or `/rename`) | rename session                                  |
 | `/note <text>`        | sticky note                                            |
 | `/pty [shell]`        | PTY upgrade in-place (optional shell override)         |
 | `/pty --reconnect [host:port]` | spawn a callback shell with a fresh PTY        |
 | `/raw` (or `/interact`) | enter raw-interact mode — same as Ctrl+G             |
+| `/full` (or `/zoom`)  | toggle full-terminal mode — same as `F3`               |
 | `/fp`                 | re-run fingerprint                                     |
 | `/kill`               | disconnect + remove current                            |
 | `/prune`              | remove every non-live session                          |
@@ -336,14 +344,14 @@ v2 (next up):
 - Streaming ANSI parser — current `from_ansi` is per-chunk and can
   glitch on escape sequences split across reads.
 
-v3:
+Shipped in v0.7.0: loot vault (sha256 dedup across hosts), UDP pseudo-session
+demux (`--udp`), and a hot-reloadable plugin API (`~/.pwnsh/plugins/`).
+
+v3 (remaining):
 
 - Multi-operator attach via Unix socket (two operators, one handler).
 - Pivot / chain — use a live session as transport for a new listener
   inside the target's network; per-session SOCKS5.
-- Loot vault with sha256 dedup across hosts.
-- Plugin API (hot-reloadable Python classes).
-- UDP pseudo-session demux (`(src_ip, src_port)` → virtual session).
 
 ## License
 

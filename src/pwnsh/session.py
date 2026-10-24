@@ -83,6 +83,11 @@ class Session:
         self.log_path = SESSIONS_DIR / f"{base}.log"
         self.cast_path = SESSIONS_DIR / f"{base}.cast"
         self.meta_path = SESSIONS_DIR / f"{base}.meta.json"
+        # Create the send lock up front, under no concurrency, so two coroutines
+        # (e.g. an auto-fingerprint worker and an operator command) can never
+        # race to build two separate locks and both send at once.
+        if self._send_lock is None:
+            self._send_lock = asyncio.Lock()
         try:
             self._log_fh = open(self.log_path, "ab")
             # Tight perms from birth — logs may contain creds/loot.
@@ -176,6 +181,8 @@ class Session:
     async def send(self, data: bytes) -> None:
         if self.writer is None:
             raise RuntimeError("session is archived (read-only)")
+        # Normally created in open_log(); fall back here for sessions built
+        # without it (defensive — keeps send() usable in isolation/tests).
         if self._send_lock is None:
             self._send_lock = asyncio.Lock()
         async with self._send_lock:
@@ -366,8 +373,9 @@ class SessionRegistry:
                 continue
             self._sessions[s.id] = s
             max_id = max(max_id, s.id)
-            for cb in self._on_add:
-                cb(s)
+            # Isolate observer failures, exactly like add() — a broken TUI or
+            # plugin callback must not abort history loading at startup.
+            self._dispatch(self._on_add, s)
             loaded += 1
         self._next_id = max(self._next_id, max_id + 1)
         return loaded

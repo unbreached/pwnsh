@@ -22,6 +22,12 @@ from textual.theme import Theme
 from textual.widgets import DataTable, Input, RichLog, Static
 
 from .. import __version__
+from ..complete import (
+    RemoteLister,
+    complete_local,
+    parse_completion_target,
+    pick,
+)
 from ..config import DATA_DIR, DEFAULT_HOST, DEFAULT_PORT, ensure_dirs
 from ..fingerprint import (
     Fingerprinter,
@@ -32,15 +38,12 @@ from ..fingerprint import (
 from ..listener import TCPListener
 from ..payloads import KINDS as PAYLOAD_KINDS
 from ..payloads import generate as generate_payload
+from ..plugins import PluginManager
 from ..raw_interact import run_raw_bridge
 from ..session import Session, SessionRegistry
-from ..complete import (
-    RemoteLister,
-    complete_local,
-    parse_completion_target,
-    pick,
-)
 from ..transfer import get_file, put_file
+from ..udp import UDPListener
+from ..vault import LootVault
 from .modals import ConfirmModal, PromptModal, SearchHit, SearchModal
 from .palette import PwnshCommands
 
@@ -95,19 +98,31 @@ _BANNER_ART = [
 ]
 
 
-# Curated key hints - replaces Textual's Footer, which surfaced the focused
-# Input's own edit bindings (e.g. "^k delete-to-end") and looked cluttered.
-def _key(k: str, label: str) -> str:
-    return f"[bold {C_ACCENT}]{k}[/] [{C_DIM}]{label}[/]"
-
-
-_KEYBAR = f"  [{C_DIM}]|[/]  ".join(
-    _key(k, label)
-    for k, label in (
-        ("^q", "quit"), ("^n/^p", "cycle"), ("^f", "search"), ("^u", "pty"),
-        ("^g", "raw"), ("^x", "kill"), ("f2", "rename"), ("^k", "palette"),
-    )
+# Persistent ACTIONS menu, rendered in the right-hand panel. Mirrors the
+# SESSIONS panel on the left for a symmetric frame around the terminal, and
+# gives every action a visible home (key + label) so nothing has to be
+# memorised. Grouped by what you're acting on: the session, the shell, files,
+# then global. Replaces the old single-line key bar and Textual's Footer.
+_ACTIONS_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("SESSION", (("^N/^P", "cycle"), ("F2", "rename"), ("^O", "note"), ("^X", "kill"))),
+    ("SHELL", (("^U", "pty"), ("^G", "raw"), ("^F", "search"), ("^Y", "copy"))),
+    ("FILES", (("/put", "upload"), ("/get", "download"))),
+    ("VIEW", (("F3", "zoom"), ("^K", "palette"))),
+    ("MORE", (("/help", "help"), ("^Q", "quit"))),
 )
+
+
+def _render_actions_menu() -> str:
+    lines: list[str] = []
+    for title, items in _ACTIONS_GROUPS:
+        lines.append(f"[bold {C_ACCENT}]{title}[/]")
+        for key, label in items:
+            lines.append(f" [bold {C_HI}]{key:<6}[/][{C_DIM}]{label}[/]")
+        lines.append("")
+    return "\n".join(lines).rstrip("\n")
+
+
+_ACTIONS_MENU = _render_actions_menu()
 
 
 CONSOLE_THEME = Theme(
@@ -237,6 +252,7 @@ class PwnshApp(App):
         Binding("ctrl+g", "raw_interact", "Raw", show=True, priority=True),
         Binding("ctrl+x", "kill_session", "Kill", show=True, priority=True),
         Binding("ctrl+y", "copy_output", "Copy", show=True, priority=True),
+        Binding("f3", "toggle_fullscreen", "Zoom", show=True, priority=True),
         Binding("ctrl+k", "command_palette", "Palette", show=True, priority=True),
         Binding("ctrl+q", "request_quit", "Quit", show=True, priority=True),
         # NB: Esc is deliberately NOT bound to quit at the app level - it is far
@@ -251,15 +267,21 @@ class PwnshApp(App):
         port: int = DEFAULT_PORT,
         host: str = DEFAULT_HOST,
         load_history: bool = True,
+        udp: bool = False,
     ) -> None:
         super().__init__()
         self.port = port
         self.host = host
         self.registry = SessionRegistry()
         self.listener = TCPListener(self.registry, host=host, port=port)
+        # Optional UDP demux on the same host:port - each datagram source becomes
+        # a virtual session (see udp.py).
+        self.udp_listener = UDPListener(self.registry, host=host, port=port) if udp else None
+        self.plugins = PluginManager(app=self)
         self._load_history = load_history
         self._status_msg = ""  # most recent notification, mirrored to the status bar
         self._raw_active = False  # True while suspended for raw-interact mode
+        self._focus_mode = False  # True = full-terminal (both side panels hidden)
         # Incremental UTF-8 decoder for the pane currently on screen. Keeping
         # decoder state across socket reads means a multibyte char split across
         # two 4 KiB chunks renders correctly instead of as replacement glyphs.
@@ -267,8 +289,12 @@ class PwnshApp(App):
         self._live_decoder: codecs.IncrementalDecoder | None = None
 
     def compose(self) -> ComposeResult:
-        # Persistent PWNSH wordmark, top-left. Plain ASCII, left-aligned.
-        yield Static("\n".join(_BANNER_ART), id="logo", markup=False)
+        # Full-width centered title bar, framing the top of the layout
+        # symmetrically with the status panel at the bottom.
+        with Vertical(id="header"):  # border-title set in on_mount
+            yield Static("", id="header-state", markup=True)
+        # Body: three framed columns - SESSIONS | terminal | ACTIONS - so the
+        # terminal sits centered between two mirrored panels.
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):  # border-title set in on_mount
                 yield DataTable(id="sessions", cursor_type="row", zebra_stripes=False)
@@ -281,11 +307,12 @@ class PwnshApp(App):
                         id="cmd",
                         suggester=_PathSuggester(self),
                     )
+            with Vertical(id="actions"):  # border-title set in on_mount
+                yield Static(_ACTIONS_MENU, id="actions-body", markup=True)
         # Framed status panel: TARGET (fingerprint) over LISTENER (listener/debug).
         with Vertical(id="status"):
             yield Static("", id="status-target", markup=True)
             yield Static("", id="status-listener", markup=True)
-        yield Static(_KEYBAR, id="keybar", markup=True)
 
     async def on_mount(self) -> None:
         ensure_dirs()
@@ -296,9 +323,17 @@ class PwnshApp(App):
             except Exception:
                 pass
         # Static panel frame titles.
+        self.query_one("#header").border_title = "pwnsh"
         self.query_one("#sidebar").border_title = "SESSIONS"
+        self.query_one("#actions").border_title = "ACTIONS"
         self.query_one("#status").border_title = "TARGET"
         self.query_one("#status-listener").border_title = "LISTENER"
+        # Header tagline (centered via CSS) - a fixed identity line; live counts
+        # live in the sidebar and the LISTENER line.
+        self.query_one("#header-state", Static).update(
+            f"[{C_TEXT}]multi-session reverse-shell handler[/]"
+            f"   [{C_DIM}]-[/]   [{C_DIM}]v{__version__}[/]"
+        )
 
         table = self.query_one("#sessions", DataTable)
         table.add_column("ID", key="id", width=4)
@@ -316,12 +351,26 @@ class PwnshApp(App):
         self.registry.on_close(self._on_session_close)
         self.registry.on_remove(self._on_session_remove)
 
+        # Plugins: fan new-session and data events out to loaded plugins. Their
+        # hooks are isolated (see PluginManager), so a bad plugin can't wedge us.
+        self.registry.on_add(self.plugins.dispatch_connect)
+        self.registry.on_data(self.plugins.dispatch_data)
+        loaded = self.plugins.load()
+        if loaded:
+            self.notify(
+                f"loaded {len(loaded)} plugin{'s' if len(loaded) != 1 else ''}: "
+                + ", ".join(loaded)
+            )
+
         if self._load_history:
             n = self.registry.load_history()
             if n:
                 self.notify(f"loaded {n} archived session{'s' if n != 1 else ''}")
 
         await self.listener.start()
+        if self.udp_listener is not None:
+            await self.udp_listener.start()
+            self.notify(f"UDP demux active on {self.host}:{self.port}")
         self.set_interval(1.0, self._refresh_table)
         self._update_prompt()
         self._refresh_status()
@@ -330,6 +379,36 @@ class PwnshApp(App):
             self._show_banner()
         # Keep focus on the prompt by default so the operator can just type.
         self.query_one("#cmd", Input).focus()
+        self._apply_responsive(self.size.width)
+
+    def on_resize(self, event) -> None:
+        self._apply_responsive(event.size.width)
+
+    def _apply_responsive(self, width: int) -> None:
+        """Decide which side panels are shown.
+
+        Full-terminal (focus) mode hides both panels so the terminal runs edge
+        to edge. Otherwise the SESSIONS sidebar is always shown and the ACTIONS
+        menu is collapsed on narrow terminals (< ~100 cols) so the terminal pane
+        keeps a usable width - the menu only mirrors keys that ^K (palette) and
+        /help still list, so hiding it costs nothing and buys back ~22 columns."""
+        try:
+            self.query_one("#sidebar").display = not self._focus_mode
+            self.query_one("#actions").display = (width >= 100) and not self._focus_mode
+        except Exception:
+            pass
+
+    def action_toggle_fullscreen(self) -> None:
+        """Toggle full-terminal mode: hide both side panels (SESSIONS + ACTIONS)
+        so the terminal fills the width. The header, TARGET/LISTENER status, and
+        prompt stay. Press F3 (or /full) again to bring the panels back."""
+        self._focus_mode = not self._focus_mode
+        self._apply_responsive(self.size.width)
+        self.notify(
+            "full-terminal mode - F3 or /full to show panels"
+            if self._focus_mode
+            else "panels restored"
+        )
 
     async def on_unmount(self) -> None:
         """Graceful shutdown - flush logs, close sockets."""
@@ -337,6 +416,11 @@ class PwnshApp(App):
             await self.listener.stop()
         except Exception:
             pass
+        if self.udp_listener is not None:
+            try:
+                await self.udp_listener.stop()
+            except Exception:
+                pass
         self.registry.close_all()
 
     def notify(self, message: str, *args, **kwargs) -> None:
@@ -426,10 +510,10 @@ class PwnshApp(App):
     # -- rendering -------------------------------------------------
     def _show_banner(self) -> None:
         """Waiting-room screen, written into the scrollback when no session is
-        selected. The PWNSH wordmark lives permanently in the top-left #logo
-        band, so here we lead straight with the listening state, then the one
-        thing a new user needs - a copy-paste payload to catch a shell -
-        followed by file-transfer, key, and multiplexer hints."""
+        selected. Leads with the ASCII wordmark, then the listening state, then
+        the one thing a new user needs - a copy-paste payload to catch a shell -
+        then file-transfer and a pointer to the ACTIONS menu / palette. Kept
+        narrow so it fits the center pane when the ACTIONS column is shown."""
         rich_log = self.query_one("#scrollback", RichLog)
         rich_log.clear()
         archived = sum(1 for s in self.registry.all() if s.status != "alive")
@@ -437,47 +521,43 @@ class PwnshApp(App):
         muxer = _detect_multiplexer()
 
         def row(label: str, value: str) -> Text:
-            return Text.from_markup(f"[{C_DIM}]{label:<12}[/] {value}")
+            return Text.from_markup(f"[{C_DIM}]{label:<10}[/] {value}")
 
         # Listening state - the headline of the empty screen.
         if live:
             state = (
                 f"[bold {C_LIVE}]*[/] [bold {C_ACCENT}]{live} LIVE[/]"
-                f"   [{C_DIM}]select a session on the left[/]"
+                f"   [{C_DIM}]pick a session on the left[/]"
             )
         else:
             state = (
                 f"[bold {C_LIVE}]*[/] [bold {C_ACCENT}]LISTENING[/]"
-                f"   [{C_DIM}]waiting for a shell to connect...[/]"
+                f"   [{C_DIM}]waiting for a shell...[/]"
             )
 
         example = generate_payload("bash", self.host, self.port) or ""
         lines = [
             Text(""),
-            Text.from_markup(
-                f"[bold {C_ACCENT}]pwnsh[/]  [{C_DIM}]-[/]  "
-                f"[{C_TEXT}]multi-session reverse-shell handler[/]"
-                f"   [{C_DIM}]v{__version__} - David Jacoby[/]"
-            ),
+            *[Text(row_art, style=f"bold {C_ACCENT}") for row_art in _BANNER_ART],
+            Text(""),
+            Text.from_markup(f"[{C_TEXT}]multi-session reverse-shell handler[/]  [{C_DIM}]v{__version__}[/]"),
             Text(""),
             row(f"{self.host}:{self.port}", state),
             row("data", f"[{C_TEXT}]{DATA_DIR}[/]"),
-            row("sessions", f"[{C_TEXT}]{live} live[/]  [{C_DIM}]-[/]  [{C_TEXT}]{archived} archived[/]"),
+            row("sessions", f"[{C_TEXT}]{live} live[/] [{C_DIM}]-[/] [{C_TEXT}]{archived} archived[/]"),
             Text(""),
             Text.from_markup(
-                f"[{C_DIM}]catch a shell - run this on the target "
-                f"([/][bold {C_ACCENT}]^Y[/][{C_DIM}] copies it to your clipboard):[/]"
+                f"[{C_DIM}]catch a shell - run on the target "
+                f"([/][bold {C_ACCENT}]^Y[/] [{C_DIM}]copies):[/]"
             ),
             Text.from_markup(f"  [bold {C_HI}]{example}[/]"),
-            Text.from_markup(f"  [{C_DIM}]/payload nc|python|powershell|perl|ruby for other variants (also copied)[/]"),
+            Text.from_markup(f"  [{C_DIM}]other: /payload nc|python|powershell|perl|ruby[/]"),
             Text(""),
-            row("files", f"[{C_TEXT}]/put <local> \\[remote][/]   [{C_DIM}]send a file to the target[/]"),
-            row("", f"[{C_TEXT}]/get <remote>[/]           [{C_DIM}]pull a file into loot/[/]"),
+            row("files", f"[{C_TEXT}]/put <local> \\[remote][/]  [{C_DIM}]-> target[/]"),
+            row("", f"[{C_TEXT}]/get <remote>[/]  [{C_DIM}]-> loot/[/]"),
             Text(""),
-            row("keys", f"[{C_ACCENT}]^N/^P[/] [{C_DIM}]switch[/]   [{C_ACCENT}]^F[/] [{C_DIM}]search[/]   "
-                        f"[{C_ACCENT}]^U[/] [{C_DIM}]pty[/]   [{C_ACCENT}]^G[/] [{C_DIM}]raw[/]"),
-            row("", f"[{C_ACCENT}]^X[/] [{C_DIM}]kill[/]      [{C_ACCENT}]^K[/] [{C_DIM}]palette[/]  "
-                    f"[{C_ACCENT}]^Q[/] [{C_DIM}]quit[/]   [{C_DIM}]/help for everything[/]"),
+            row("actions", f"[{C_DIM}]see the[/] [bold {C_ACCENT}]ACTIONS[/] [{C_DIM}]menu, or[/] "
+                           f"[bold {C_ACCENT}]^K[/] [{C_DIM}]palette[/] [{C_DIM}]-[/] [bold {C_ACCENT}]/help[/]"),
         ]
         for line in lines:
             rich_log.write(line)
@@ -486,8 +566,7 @@ class PwnshApp(App):
             rich_log.write(Text(""))
             rich_log.write(row(
                 "tip",
-                f"[{C_TEXT}]inside {muxer} - pwnsh keys don't collide with the "
-                f"{muxer} prefix. raw mode (^G) needs a real tty.[/]",
+                f"[{C_TEXT}]inside {muxer}: keys don't clash; ^G raw needs a real tty[/]",
             ))
 
     def _append_scrollback(self, data: bytes) -> None:
@@ -625,12 +704,12 @@ class PwnshApp(App):
         cmd = cmd.lower()
         if cmd == "help":
             self._show_help()
-        elif cmd == "put":
+        elif cmd in ("put", "upload"):
             if not args:
                 self.notify("usage: /put <local> [remote]", severity="warning")
                 return
             self._do_put(Path(args[0]), args[1] if len(args) > 1 else None)
-        elif cmd == "get":
+        elif cmd in ("get", "download"):
             if not args:
                 self.notify("usage: /get <remote>", severity="warning")
                 return
@@ -662,8 +741,48 @@ class PwnshApp(App):
             self._show_payload(args[0] if args else "")
         elif cmd == "copy":
             self.action_copy_output()
+        elif cmd in ("full", "fullscreen", "zoom"):
+            self.action_toggle_fullscreen()
+        elif cmd == "loot":
+            self._show_loot()
+        elif cmd == "reload":
+            names = self.plugins.reload()
+            self.notify(
+                f"reloaded plugins: {', '.join(names)}" if names else "no plugins to load"
+            )
+        elif cmd == "plugins":
+            names = self.plugins.names()
+            cmds = self.plugins.command_names()
+            self.notify(
+                f"plugins: {', '.join(names) or '(none)'}"
+                + (f"   commands: {', '.join('/' + c for c in cmds)}" if cmds else "")
+            )
+        elif self.plugins.command(cmd) is not None:
+            try:
+                self.plugins.command(cmd)(self, args)
+            except Exception as e:
+                self.notify(f"/{cmd} failed: {e}", severity="error")
         else:
             self.notify(f"unknown slash command: /{cmd}", severity="warning")
+
+    def _show_loot(self) -> None:
+        """Print a summary of the content-addressed loot vault."""
+        st = LootVault().stats()
+        rich_log = self.query_one("#scrollback", RichLog)
+        rich_log.write(Text("---- loot vault ----", style=f"bold {C_ACCENT}"))
+        rich_log.write(Text(
+            f"  objects     {st['objects']}  (unique files, sha256-addressed)",
+            style=C_TEXT,
+        ))
+        rich_log.write(Text(
+            f"  references  {st['references']}  (pulls across all hosts/sessions)",
+            style=C_TEXT,
+        ))
+        rich_log.write(Text(
+            f"  stored      {_fmt_bytes(st['stored_bytes'])}"
+            f"   saved by dedup  {_fmt_bytes(st['saved_bytes'])}",
+            style=C_TEXT,
+        ))
 
     def _show_payload(self, kind: str) -> None:
         """Render a reverse-shell one-liner for the listener's host:port into
@@ -697,8 +816,8 @@ class PwnshApp(App):
         rich_log = self.query_one("#scrollback", RichLog)
         rich_log.write(Text("---- pwnsh commands ----", style=f"bold {C_ACCENT}"))
         for line in [
-            "  /put <local> [remote]   upload a file (base64 heredoc, sha256 verify)",
-            "  /get <remote>           download a file to ~/.pwnsh/loot/",
+            "  /put <local> [remote]   upload a file (alias /upload; base64, sha256 verify)",
+            "  /get <remote>           download a file to ~/.pwnsh/loot/ (alias /download)",
             "  /tag <name>             rename the current session  (also F2)",
             "  /note <text>            sticky note on the session   (Ctrl+O)",
             "  /pty                    upgrade to a PTY + sync size (Ctrl+U)",
@@ -707,8 +826,12 @@ class PwnshApp(App):
             "  /prune                  remove every non-live session",
             "  /payload <kind>         print + copy a host:port-stamped one-liner (bash, python, nc, ...)",
             "  /copy                   copy this session's output to the clipboard (Ctrl+Y)",
+            "  /loot                   loot-vault summary (sha256-deduped across hosts)",
+            "  /plugins                list loaded plugins + their commands",
+            "  /reload                 hot-reload plugins from ~/.pwnsh/plugins/",
             "  Ctrl+N / Ctrl+P         next / previous session",
             "  Ctrl+F                  search scrollback across all sessions",
+            "  F3  (or /full)          full-terminal mode - hide the side panels",
             "  Ctrl+K                  command palette",
             "  Ctrl+Q                  quit (confirms if a session is live)",
         ]:
@@ -780,9 +903,9 @@ class PwnshApp(App):
     def action_copy_output(self) -> None:
         """Copy something useful to the clipboard.
 
-        The dashboard captures the mouse (so a click can focus the prompt),
-        which disables the terminal's native drag-to-select - so provide a
-        one-key copy instead. With a session selected it copies that session's
+        pwnsh runs with the mouse off so the terminal keeps its own
+        drag-to-select, but a one-key copy is still handy (and works over SSH
+        via OSC 52). With a session selected it copies that session's
         scrollback; on the waiting screen it copies the ready-to-paste bash
         reverse-shell one-liner shown in the banner, which is the thing an
         operator most wants to grab there.
