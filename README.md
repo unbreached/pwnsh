@@ -9,8 +9,7 @@ Think pwncat, but with search, replay, persistence, and a nicer TUI.</p>
 
 <p align="center">
   <a href="https://github.com/unbreached/pwnsh/actions/workflows/ci.yml"><img src="https://github.com/unbreached/pwnsh/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://pypi.org/project/pwnsh/"><img src="https://img.shields.io/pypi/v/pwnsh.svg" alt="PyPI version"></a>
-  <img src="https://img.shields.io/pypi/pyversions/pwnsh.svg" alt="Supported Python versions">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue.svg" alt="Python 3.11+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
@@ -117,16 +116,9 @@ LOLBins, DNS/TLS tunnels, encoding tricks, and blue-team detection signals.
 
 ## Install
 
-Needs Python 3.11+. The recommended way is [`pipx`](https://pipx.pypa.io/),
-which drops `pwnsh` on your PATH in its own isolated venv:
-
-```sh
-pipx install pwnsh      # or: pip install --user pwnsh
-pwnsh -p 9090
-```
-
-Prefer to run from a checkout (hacking on it, or air-gapped)? Any of the
-methods below work.
+Needs Python 3.11+. pwnsh isn't on PyPI yet (a release is planned — then
+`pipx install pwnsh` will work); for now, install from a checkout with any of
+the methods below. The zero-touch option is `./run.sh`.
 
 ### Clone and run (zero-touch, ideal over SSH)
 
