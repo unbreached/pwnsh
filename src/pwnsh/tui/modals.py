@@ -122,6 +122,9 @@ class SearchModal(ModalScreen[SearchHit | None]):
         super().__init__()
         self._registry = registry
         self._hits: list[SearchHit] = []
+        # (session_id, label, line) decoded once; searched in-memory per
+        # keystroke. Built on mount — see _build_index.
+        self._index: list[tuple[int, str, str]] = []
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -131,7 +134,20 @@ class SearchModal(ModalScreen[SearchHit | None]):
             yield Static("", id="status", markup=False)
 
     def on_mount(self) -> None:
+        self._build_index()
         self.query_one("#search-input", Input).focus()
+
+    def _build_index(self) -> None:
+        """Decode every session's scrollback to lines exactly once, when the
+        modal opens. Search is a snapshot, so re-decoding the whole buffer of
+        every session on every keystroke (as this used to) is wasted work — a
+        few live chunks arriving mid-search don't matter."""
+        index: list[tuple[int, str, str]] = []
+        for s in self._registry.all():
+            blob = b"".join(s.scrollback).decode("utf-8", errors="replace")
+            for line in blob.splitlines():
+                index.append((s.id, s.label, line))
+        self._index = index
 
     @on(Input.Changed, "#search-input")
     def _on_change(self, event: Input.Changed) -> None:
@@ -157,16 +173,12 @@ class SearchModal(ModalScreen[SearchHit | None]):
             status.update(f"bad regex: {e}")
             return
         total = 0
-        for s in self._registry.all():
-            blob = b"".join(s.scrollback).decode("utf-8", errors="replace")
-            for line in blob.splitlines():
-                if rx.search(line):
-                    self._hits.append(SearchHit(s.id, s.label, line))
-                    total += 1
-                    if total >= 500:
-                        break
-            if total >= 500:
-                break
+        for sid, label, line in self._index:
+            if rx.search(line):
+                self._hits.append(SearchHit(sid, label, line))
+                total += 1
+                if total >= 500:
+                    break
         for hit in self._hits:
             lv.append(ListItem(Label(f"#{hit.session_id}  {hit.label}  |  {hit.line[:160]}")))
         status.update(f"{total} hit(s)" + (" (capped at 500)" if total >= 500 else ""))

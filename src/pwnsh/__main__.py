@@ -16,18 +16,14 @@ def _die(msg: str, hint: str | None = None) -> None:
     sys.exit(2)
 
 
-def _check_bind_or_die(host: str, port: int) -> None:
-    """Pre-flight bind check so a port-in-use (or bad-address) scenario fails
-    with a friendly message instead of a Textual traceback. There is a small
-    TOCTOU window between this check and the real listener — acceptable, since
-    this only exists to give a clean error in the common case (previous run
-    still holding the port, port collides with another service).
-
-    Resolves the address family from the bind string so IPv6 binds (``-b ::1``,
-    ``-b ::``) and hostnames work, not just IPv4 literals.
-    """
+def _probe_bind(host: str, port: int, socktype: int) -> None:
+    """Try to bind ``host:port`` for one socket type, dying with a friendly
+    message on failure. Resolves the address family from the bind string so
+    IPv6 binds (``-b ::1``, ``-b ::``) and hostnames work, not just IPv4
+    literals."""
+    proto_label = "TCP" if socktype == socket.SOCK_STREAM else "UDP"
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(host, port, type=socktype)
     except socket.gaierror as e:
         _die(
             f"cannot resolve bind address {host!r} — {e.strerror or e}",
@@ -35,19 +31,35 @@ def _check_bind_or_die(host: str, port: int) -> None:
             "(e.g. 0.0.0.0, 127.0.0.1, ::1).",
         )
         return
-    family, socktype, proto, _canon, sockaddr = infos[0]
-    s = socket.socket(family, socktype, proto)
+    family, st, proto, _canon, sockaddr = infos[0]
+    s = socket.socket(family, st, proto)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         s.bind(sockaddr)
     except OSError as e:
         _die(
-            f"cannot bind {host}:{port} — {e.strerror or e}",
+            f"cannot bind {proto_label} {host}:{port} — {e.strerror or e}",
             "another process is holding the port. Try -p <other> "
             "(e.g. -p 4444) or -b 127.0.0.1 for local-only.",
         )
     finally:
         s.close()
+
+
+def _check_bind_or_die(host: str, port: int, udp: bool = False) -> None:
+    """Pre-flight bind check so a port-in-use (or bad-address) scenario fails
+    with a friendly message instead of a Textual traceback. There is a small
+    TOCTOU window between this check and the real listener — acceptable, since
+    this only exists to give a clean error in the common case (previous run
+    still holding the port, port collides with another service).
+
+    With ``--udp`` the UDP socket binds the same port separately, so probe it
+    too — otherwise a UDP-only clash slips past the TCP check and crashes the
+    listener at start.
+    """
+    _probe_bind(host, port, socket.SOCK_STREAM)
+    if udp:
+        _probe_bind(host, port, socket.SOCK_DGRAM)
 
 
 def main() -> None:
@@ -94,7 +106,7 @@ def main() -> None:
         print(f"error: port must be 1..65535 (got {args.port})", file=sys.stderr)
         sys.exit(2)
 
-    _check_bind_or_die(args.bind, args.port)
+    _check_bind_or_die(args.bind, args.port, udp=args.udp)
 
     app = PwnshApp(
         port=args.port,

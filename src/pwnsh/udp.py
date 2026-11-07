@@ -85,11 +85,19 @@ class UDPListener:
         self._by_addr: dict[tuple[str, int], int] = {}  # source addr -> session id
 
     async def start(self) -> None:
+        # Evict the addr->id mapping when a session is removed, so _by_addr can't
+        # grow without bound over a long run as sessions are killed/pruned.
+        self.registry.on_remove(self._evict_addr)
         loop = asyncio.get_running_loop()
         self._transport, _ = await loop.create_datagram_endpoint(
             lambda: _UDPProtocol(self._on_datagram),
             local_addr=(self.host, self.port),
         )
+
+    def _evict_addr(self, session) -> None:
+        dead = [addr for addr, sid in self._by_addr.items() if sid == session.id]
+        for addr in dead:
+            self._by_addr.pop(addr, None)
 
     async def stop(self) -> None:
         if self._transport is not None:

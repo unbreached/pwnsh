@@ -84,6 +84,7 @@ C_TEXT   = "#c3ccd8"  # body text - cool off-white
 C_DIM    = "#697585"  # muted - labels, separators
 C_LIVE   = "#5fd88a"  # live sessions - signal green
 C_ERR    = "#e5624a"  # dead / danger / errors - red
+C_WARN   = "#e3b341"  # warnings - amber
 C_BG     = "#0c0f14"  # deep cool graphite ground
 
 # ASCII wordmark for the waiting screen. Deliberately plain ASCII only - no
@@ -280,6 +281,7 @@ class PwnshApp(App):
         self.plugins = PluginManager(app=self)
         self._load_history = load_history
         self._status_msg = ""  # most recent notification, mirrored to the status bar
+        self._status_severity = "information"  # severity of _status_msg (colours it)
         self._raw_active = False  # True while suspended for raw-interact mode
         self._focus_mode = False  # True = full-terminal (both side panels hidden)
         # Incremental UTF-8 decoder for the pane currently on screen. Keeping
@@ -353,7 +355,9 @@ class PwnshApp(App):
 
         # Plugins: fan new-session and data events out to loaded plugins. Their
         # hooks are isolated (see PluginManager), so a bad plugin can't wedge us.
-        self.registry.on_add(self.plugins.dispatch_connect)
+        # on_connect only fires for *live* sessions — load_history also emits
+        # on_add for archived ones, which must not look like fresh shells.
+        self.registry.on_add(self._plugin_on_connect)
         self.registry.on_data(self.plugins.dispatch_data)
         loaded = self.plugins.load()
         if loaded:
@@ -423,13 +427,17 @@ class PwnshApp(App):
                 pass
         self.registry.close_all()
 
-    def notify(self, message: str, *args, **kwargs) -> None:
+    def notify(
+        self, message: str, *args, severity: str = "information", **kwargs
+    ) -> None:
         """Route messages to the plain-ASCII LISTENER status line instead of a
         pop-up toast. Textual toasts are bordered boxes (a graphic); the status
         line keeps everything to plain text, and the latest message stays
-        visible instead of fading. ``*args``/``**kwargs`` (e.g. ``severity``)
-        are accepted for call compatibility and ignored."""
+        visible instead of fading. ``severity`` (information | warning | error)
+        colours the line so a failure reads differently from routine status;
+        other ``*args``/``**kwargs`` are accepted for call compatibility."""
         self._status_msg = message
+        self._status_severity = severity
         try:
             self._refresh_status()
         except Exception:
@@ -453,6 +461,14 @@ class PwnshApp(App):
             pass
 
     # -- registry callbacks ----------------------------------------
+    def _plugin_on_connect(self, s: Session) -> None:
+        """Forward only genuine, live connections to plugin on_connect hooks.
+        Archived sessions restored by load_history also fire on_add, but they
+        aren't new shells — a plugin that e.g. auto-runs a command would blow up
+        on a dead (writer=None) session."""
+        if s.status == "alive":
+            self.plugins.dispatch_connect(s)
+
     def _on_session_add(self, s: Session) -> None:
         table = self.query_one("#sessions", DataTable)
         try:
@@ -616,10 +632,18 @@ class PwnshApp(App):
         live = len(self.registry.live())
         archived = sum(1 for x in self.registry.all() if x.status != "alive")
         msg = self._status_msg or "ready"
+        # Colour the message by severity so a failure doesn't read like routine
+        # status. Errors/warnings get a tag so colour isn't the only signal.
+        if self._status_msg and self._status_severity == "error":
+            msg_markup = f"[bold {C_ERR}]! {msg}[/]"
+        elif self._status_msg and self._status_severity == "warning":
+            msg_markup = f"[{C_WARN}]! {msg}[/]"
+        else:
+            msg_markup = f"[{C_DIM}]{msg}[/]"
         lst.update(
             f"[bold {C_LIVE}]*[/] [{C_ACCENT}]{self.host}:{self.port}[/]"
             f"   [{C_TEXT}]{live} live[/] [{C_DIM}]-[/] [{C_TEXT}]{archived} archived[/]"
-            f"   [{C_DIM}]- {msg}[/]"
+            f"   [{C_DIM}]-[/] {msg_markup}"
         )
 
     def _update_prompt(self) -> None:

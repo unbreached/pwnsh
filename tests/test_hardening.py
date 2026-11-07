@@ -87,6 +87,23 @@ def test_check_bind_exits_when_port_in_use():
         holder.close()
 
 
+def test_check_bind_probes_udp_only_when_requested(free_port, monkeypatch):
+    """With --udp the UDP socket binds the same port separately, so the
+    pre-flight must probe SOCK_DGRAM too — otherwise a UDP-only clash slips
+    past the TCP-only check and crashes the listener at start."""
+    import pwnsh.__main__ as m
+
+    probed: list[int] = []
+    monkeypatch.setattr(m, "_probe_bind", lambda h, p, st: probed.append(st))
+
+    m._check_bind_or_die("127.0.0.1", free_port)
+    assert probed == [socket.SOCK_STREAM]
+
+    probed.clear()
+    m._check_bind_or_die("127.0.0.1", free_port, udp=True)
+    assert probed == [socket.SOCK_STREAM, socket.SOCK_DGRAM]
+
+
 # ── /get path safety ───────────────────────────────────────────────────
 def test_get_with_degenerate_remote_uses_safe_loot_name(loot_dir, free_port):
     payload = b"contents that came back for a rootish path\n"
