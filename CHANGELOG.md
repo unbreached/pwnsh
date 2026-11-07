@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-08
+
 ### Added
 - **Full-terminal mode** (`F3`, or `/full` / `/zoom`) hides both side panels so
   the shell pane fills the width; `F3` again restores them.
