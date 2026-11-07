@@ -14,6 +14,17 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - Command aliases `/upload` (= `/put`) and `/download` (= `/get`), with the same
   path completion.
 
+### Packaging
+- **GitHub Actions CI** - `ruff` + `pytest` on Python 3.11/3.12/3.13 across
+  Linux and macOS, on every push and PR.
+- **PyPI release workflow** via Trusted Publishing (OIDC, no stored token) -
+  publishes sdist + wheel when a GitHub Release is published. `pipx install
+  pwnsh` once released.
+- `py.typed` marker so downstreams pick up pwnsh's type hints.
+- `SECURITY.md` (private disclosure + authorized-use scope) and
+  `CONTRIBUTING.md`; README gains CI/PyPI/license badges, an authorized-use
+  banner, and a `pipx` install path.
+
 ### Changed
 - **Dashboard reworked to a symmetric three-column layout**: a centered `pwnsh`
   title bar on top and the `TARGET` / `LISTENER` status panel below frame the
@@ -29,6 +40,25 @@ versioning: [SemVer](https://semver.org/spec/v2.0.0.html).
 - `load_history` now isolates observer-callback failures like `add()` does, so a
   broken TUI or plugin callback can't abort startup.
 - Output pane no longer draws a dark scrollbar strip over its right edge.
+- **`/pty --reconnect` no longer hard-codes `/bin/bash`.** The callback payload
+  now resolves an existing shell on the target (`$SHELL` → `bash` → `sh`), so
+  the reconnect lands a PTY on bash-less hosts (Alpine, busybox) instead of
+  failing. Matches the in-place upgrade's behavior.
+- **`--udp` now gets the same friendly bind pre-flight as TCP.** A UDP-only
+  port clash previously slipped past the TCP-only check and crashed the
+  listener; it now fails with a clean message.
+- **Cross-session search no longer re-decodes every scrollback on each
+  keystroke.** The search modal decodes all sessions once into a line index
+  when it opens, then filters that snapshot - no more lag with large buffers.
+- **Plugins no longer see restored archived sessions as new connects.**
+  `on_connect` fires only for genuinely live sessions; `load_history` still
+  shows archived rows in the sidebar but doesn't trip plugin hooks at startup.
+- **The status line now reflects severity.** `error` / `warning` notifications
+  render in red / amber with a `!` tag, so a failure no longer looks identical
+  to routine status.
+- **UDP source map no longer grows without bound.** `_by_addr` entries are
+  evicted when a session is removed, instead of lingering for the process
+  lifetime as sessions are killed/pruned.
 
 ## [0.7.0] - 2026-09-13
 

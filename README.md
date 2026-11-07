@@ -7,6 +7,16 @@
 <p align="center"><em>Multi-session reverse-shell handler with a terminal dashboard.</em><br>
 Think pwncat, but with search, replay, persistence, and a nicer TUI.</p>
 
+<p align="center">
+  <a href="https://github.com/unbreached/pwnsh/actions/workflows/ci.yml"><img src="https://github.com/unbreached/pwnsh/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://pypi.org/project/pwnsh/"><img src="https://img.shields.io/pypi/v/pwnsh.svg" alt="PyPI version"></a>
+  <img src="https://img.shields.io/pypi/pyversions/pwnsh.svg" alt="Supported Python versions">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
+<p align="center"><sub><strong>For authorized security testing only.</strong>
+Pentests, CTFs, red-team labs, and research — see <a href="#ethics">Ethics</a>.</sub></p>
+
 ```
 +========================== pwnsh =============================+
 +- SESSIONS ---+- #3 - web-prod-01 - * LIVE --------+- ACTIONS -+
@@ -106,6 +116,17 @@ payloads for bash, nc, python, PHP, Flask SSTI, PowerShell, Go, msfvenom,
 LOLBins, DNS/TLS tunnels, encoding tricks, and blue-team detection signals.
 
 ## Install
+
+Needs Python 3.11+. The recommended way is [`pipx`](https://pipx.pypa.io/),
+which drops `pwnsh` on your PATH in its own isolated venv:
+
+```sh
+pipx install pwnsh      # or: pip install --user pwnsh
+pwnsh -p 9090
+```
+
+Prefer to run from a checkout (hacking on it, or air-gapped)? Any of the
+methods below work.
 
 ### Clone and run (zero-touch, ideal over SSH)
 
